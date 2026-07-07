@@ -82,6 +82,19 @@ static void die_ssl(const char *what)
     exit(1);
 }
 
+static void log_hex(const char *label, const unsigned char *buf, size_t len)
+{
+    size_t i;
+    printf("%s (%zu bytes): ", label, len);
+    for (i = 0; i < len; i++) printf("%02X", buf[i]);
+    putchar('\n');
+}
+
+static void log_step(const char *label)
+{
+    printf("\n=== %s ===\n", label);
+}
+
 static int socket_init(void)
 {
 #ifdef _WIN32
@@ -261,6 +274,19 @@ static int get_raw_pub(EVP_PKEY *key, unsigned char **pub, size_t *pub_len)
     return 0;
 }
 
+static int get_raw_priv(EVP_PKEY *key, unsigned char **priv, size_t *priv_len)
+{
+    if (EVP_PKEY_get_raw_private_key(key, NULL, priv_len) <= 0) return -1;
+    *priv = (unsigned char *)malloc(*priv_len);
+    if (!*priv) return -1;
+    if (EVP_PKEY_get_raw_private_key(key, *priv, priv_len) <= 0) {
+        free(*priv);
+        *priv = NULL;
+        return -1;
+    }
+    return 0;
+}
+
 static int derive_x25519(EVP_PKEY *priv, const unsigned char *peer_pub, size_t peer_pub_len,
                          unsigned char update_key[UPDATE_KEY_LEN])
 {
@@ -280,7 +306,9 @@ static int derive_x25519(EVP_PKEY *priv, const unsigned char *peer_pub, size_t p
     secret = (unsigned char *)malloc(secret_len);
     if (!secret) goto done;
     if (EVP_PKEY_derive(ctx, secret, &secret_len) <= 0) goto done;
+    log_hex("ECDH raw shared secret", secret, secret_len);
     if (hkdf_sha256(secret, secret_len, "ECDH-X25519", update_key) < 0) goto done;
+    log_hex("ECDH HKDF-derived Update Key", update_key, UPDATE_KEY_LEN);
     ok = 1;
 done:
     if (secret) OPENSSL_cleanse(secret, secret_len);
@@ -374,6 +402,13 @@ static int send_encrypted(struct channel *ch, const unsigned char *plain, uint32
     if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, GCM_TAG_LEN, tag) <= 0) goto done;
     memcpy(buf + GCM_NONCE_LEN + total, tag, GCM_TAG_LEN);
     payload_len = (uint32_t)(GCM_NONCE_LEN + total + GCM_TAG_LEN);
+    log_step("Encrypted outbound communication");
+    printf("Plaintext bytes: %u\n", plain_len);
+    log_hex("Plaintext", plain, plain_len);
+    log_hex("AES-256-GCM nonce", nonce, GCM_NONCE_LEN);
+    log_hex("AES-256-GCM ciphertext", buf + GCM_NONCE_LEN, (size_t)total);
+    log_hex("AES-256-GCM tag", tag, GCM_TAG_LEN);
+    printf("Sending encrypted frame payload bytes: %u\n", payload_len);
     ok = send_msg(ch->secure_sock, MSG_DATA, buf, payload_len);
 done:
     free(buf);
@@ -392,6 +427,7 @@ static int recv_encrypted(struct channel *ch, unsigned char **plain, uint32_t *p
 
     if (recv_msg(ch->secure_sock, &type, &payload, &payload_len) < 0) return -1;
     if (type == MSG_CLOSE) {
+        printf("\nReceived encrypted close notification\n");
         free(payload);
         *plain = NULL;
         *plain_len = 0;
@@ -413,6 +449,12 @@ static int recv_encrypted(struct channel *ch, unsigned char **plain, uint32_t *p
     if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, GCM_TAG_LEN,
             payload + GCM_NONCE_LEN + *plain_len) <= 0) goto done;
     if (EVP_DecryptFinal_ex(ctx, *plain + total, &len) <= 0) goto done;
+    log_step("Decrypted inbound communication");
+    printf("Encrypted frame payload bytes: %u\n", payload_len);
+    log_hex("AES-256-GCM nonce", payload, GCM_NONCE_LEN);
+    log_hex("AES-256-GCM ciphertext", payload + GCM_NONCE_LEN, *plain_len);
+    log_hex("AES-256-GCM tag", payload + GCM_NONCE_LEN + *plain_len, GCM_TAG_LEN);
+    log_hex("Decrypted plaintext", *plain, *plain_len);
     ch->recv_counter++;
     ok = 0;
 done:
@@ -465,21 +507,29 @@ static int parse_hello(const unsigned char *p, uint32_t len, uint8_t *alg,
 static int ecdh_master_handshake(socket_t s, unsigned char update_key[UPDATE_KEY_LEN])
 {
     EVP_PKEY *key = make_x25519_key();
-    unsigned char *pub = NULL, *payload = NULL;
-    size_t pub_len = 0;
+    unsigned char *pub = NULL, *priv = NULL, *payload = NULL;
+    size_t pub_len = 0, priv_len = 0;
     uint8_t type, alg;
     uint32_t len, body_len;
     const unsigned char *body;
     int ok = -1;
 
-    if (!key || get_raw_pub(key, &pub, &pub_len) < 0 || pub_len > UINT32_MAX) goto done;
+    log_step("ECDH master handshake");
+    if (!key || get_raw_pub(key, &pub, &pub_len) < 0 ||
+        get_raw_priv(key, &priv, &priv_len) < 0 || pub_len > UINT32_MAX) goto done;
+    log_hex("Master X25519 private key", priv, priv_len);
+    log_hex("Master X25519 public key", pub, pub_len);
+    printf("Sending CLIENT_HELLO with X25519 public key\n");
     if (send_client_hello(s, ALG_ECDH_X25519, pub, (uint32_t)pub_len) < 0) goto done;
     if (recv_msg(s, &type, &payload, &len) < 0) goto done;
     if (type != MSG_SERVER_HELLO || parse_hello(payload, len, &alg, &body, &body_len) < 0) goto done;
     if (alg != ALG_ECDH_X25519) goto done;
+    log_hex("Received outstation X25519 public key", body, body_len);
     ok = derive_x25519(key, body, body_len, update_key);
 done:
     free(payload);
+    if (priv) OPENSSL_cleanse(priv, priv_len);
+    free(priv);
     free(pub);
     EVP_PKEY_free(key);
     return ok;
@@ -490,14 +540,22 @@ static int ecdh_outstation_handshake(socket_t s, const unsigned char *client_pub
                                      unsigned char update_key[UPDATE_KEY_LEN])
 {
     EVP_PKEY *key = make_x25519_key();
-    unsigned char *pub = NULL;
-    size_t pub_len = 0;
+    unsigned char *pub = NULL, *priv = NULL;
+    size_t pub_len = 0, priv_len = 0;
     int ok = -1;
 
-    if (!key || get_raw_pub(key, &pub, &pub_len) < 0 || pub_len > UINT32_MAX) goto done;
+    log_step("ECDH outstation handshake");
+    log_hex("Received master X25519 public key", client_pub, client_pub_len);
+    if (!key || get_raw_pub(key, &pub, &pub_len) < 0 ||
+        get_raw_priv(key, &priv, &priv_len) < 0 || pub_len > UINT32_MAX) goto done;
+    log_hex("Outstation X25519 private key", priv, priv_len);
+    log_hex("Outstation X25519 public key", pub, pub_len);
+    printf("Sending SERVER_HELLO with X25519 public key\n");
     if (send_server_hello(s, ALG_ECDH_X25519, pub, (uint32_t)pub_len) < 0) goto done;
     ok = derive_x25519(key, client_pub, client_pub_len, update_key);
 done:
+    if (priv) OPENSSL_cleanse(priv, priv_len);
+    free(priv);
     free(pub);
     EVP_PKEY_free(key);
     return ok;
@@ -516,10 +574,13 @@ static int mlkem_master_handshake(socket_t s, unsigned char update_key[UPDATE_KE
     OSSL_PARAM params[2];
     int ok = -1;
 
+    log_step("ML-KEM master handshake");
+    printf("Sending CLIENT_HELLO requesting ML-KEM-768\n");
     if (send_client_hello(s, ALG_MLKEM768, NULL, 0) < 0) goto done;
     if (recv_msg(s, &type, &payload, &len) < 0) goto done;
     if (type != MSG_SERVER_HELLO || parse_hello(payload, len, &alg, &body, &body_len) < 0) goto done;
     if (alg != ALG_MLKEM768) goto done;
+    log_hex("Received outstation ML-KEM-768 public key", body, body_len);
 
     pctx = EVP_PKEY_CTX_new_from_name(NULL, "ML-KEM-768", NULL);
     if (!pctx || EVP_PKEY_fromdata_init(pctx) <= 0) goto done;
@@ -536,8 +597,11 @@ static int mlkem_master_handshake(socket_t s, unsigned char update_key[UPDATE_KE
     if (!ciphertext || !secret) goto done;
     if (EVP_PKEY_encapsulate(pctx, ciphertext, &ciphertext_len, secret, &secret_len) <= 0) goto done;
     if (ciphertext_len > UINT32_MAX) goto done;
+    log_hex("ML-KEM ciphertext sent to outstation", ciphertext, ciphertext_len);
+    log_hex("ML-KEM shared secret", secret, secret_len);
     if (send_msg(s, MSG_CLIENT_HELLO, ciphertext, (uint32_t)ciphertext_len) < 0) goto done;
     if (hkdf_sha256(secret, secret_len, "ML-KEM-768", update_key) < 0) goto done;
+    log_hex("ML-KEM HKDF-derived Update Key", update_key, UPDATE_KEY_LEN);
     ok = 0;
 done:
     if (secret) OPENSSL_cleanse(secret, secret_len);
@@ -560,6 +624,7 @@ static int mlkem_outstation_handshake(socket_t s, unsigned char update_key[UPDAT
     size_t public_key_len = 0, secret_len = 0;
     int ok = -1;
 
+    log_step("ML-KEM outstation handshake");
     pctx = EVP_PKEY_CTX_new_from_name(NULL, "ML-KEM-768", NULL);
     if (!pctx || EVP_PKEY_keygen_init(pctx) <= 0) goto done;
     if (EVP_PKEY_keygen(pctx, &key) <= 0) goto done;
@@ -573,17 +638,22 @@ static int mlkem_outstation_handshake(socket_t s, unsigned char update_key[UPDAT
     if (EVP_PKEY_get_octet_string_param(key, OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY,
                                         public_key, public_key_len, &public_key_len) <= 0) goto done;
     if (public_key_len > UINT32_MAX) goto done;
+    log_hex("Outstation ML-KEM-768 public key", public_key, public_key_len);
+    printf("Sending SERVER_HELLO with ML-KEM-768 public key\n");
     if (send_server_hello(s, ALG_MLKEM768, public_key, (uint32_t)public_key_len) < 0) goto done;
 
     if (recv_msg(s, &type, &payload, &len) < 0) goto done;
     if (type != MSG_CLIENT_HELLO) goto done;
+    log_hex("Received master ML-KEM ciphertext", payload, len);
     pctx = EVP_PKEY_CTX_new_from_pkey(NULL, key, NULL);
     if (!pctx || EVP_PKEY_decapsulate_init(pctx, NULL) <= 0) goto done;
     if (EVP_PKEY_decapsulate(pctx, NULL, &secret_len, payload, len) <= 0) goto done;
     secret = (unsigned char *)malloc(secret_len);
     if (!secret) goto done;
     if (EVP_PKEY_decapsulate(pctx, secret, &secret_len, payload, len) <= 0) goto done;
+    log_hex("ML-KEM shared secret", secret, secret_len);
     if (hkdf_sha256(secret, secret_len, "ML-KEM-768", update_key) < 0) goto done;
+    log_hex("ML-KEM HKDF-derived Update Key", update_key, UPDATE_KEY_LEN);
     ok = 0;
 done:
     if (secret) OPENSSL_cleanse(secret, secret_len);
@@ -607,8 +677,12 @@ static int master_handshake(socket_t s, int use_ml_kem, unsigned char session_ke
     } else {
         if (ecdh_master_handshake(s, update_key) < 0) goto done;
     }
+    log_step("Master session key establishment");
     if (RAND_bytes(session_key, SESSION_KEY_LEN) != 1) goto done;
+    log_hex("Generated AES-256-GCM session key", session_key, SESSION_KEY_LEN);
     if (aes_wrap_key(update_key, session_key, &wrapped, &wrapped_len) < 0) goto done;
+    log_hex("AES Key Wrap output carrying session key", wrapped, (size_t)wrapped_len);
+    printf("Sending WRAPPED_SESSION to outstation proxy\n");
     if (send_msg(s, MSG_WRAPPED_SESSION, wrapped, (uint32_t)wrapped_len) < 0) goto done;
     ok = 0;
 done:
@@ -639,7 +713,10 @@ static int outstation_handshake(socket_t s, int use_ml_kem, unsigned char sessio
     payload = NULL;
     if (recv_msg(s, &type, &wrapped, &wrapped_len) < 0) goto done;
     if (type != MSG_WRAPPED_SESSION) goto done;
+    log_step("Outstation session key establishment");
+    log_hex("Received AES Key Wrap payload", wrapped, wrapped_len);
     if (aes_unwrap_key(update_key, wrapped, (int)wrapped_len, session_key) < 0) goto done;
+    log_hex("Unwrapped AES-256-GCM session key", session_key, SESSION_KEY_LEN);
     ok = 0;
 done:
     OPENSSL_cleanse(update_key, sizeof(update_key));
@@ -664,10 +741,14 @@ static int relay(socket_t plain_sock, struct channel *ch)
         if (FD_ISSET(plain_sock, &rfds)) {
             int n = recv(plain_sock, (char *)buf, sizeof(buf), 0);
             if (n <= 0) {
+                printf("\nPlaintext side closed; sending encrypted close notification\n");
                 send_msg(ch->secure_sock, MSG_CLOSE, NULL, 0);
                 done = 1;
-            } else if (send_encrypted(ch, buf, (uint32_t)n) < 0) {
-                return -1;
+            } else {
+                printf("\nPlaintext -> secure: received %d plaintext bytes from local endpoint\n", n);
+                if (send_encrypted(ch, buf, (uint32_t)n) < 0) {
+                    return -1;
+                }
             }
         }
 
@@ -682,6 +763,7 @@ static int relay(socket_t plain_sock, struct channel *ch)
                 free(plain);
                 return -1;
             } else {
+                printf("\nSecure -> plaintext: forwarding %u decrypted bytes to local endpoint\n", plain_len);
                 if (send_all(plain_sock, plain, plain_len) < 0) {
                     free(plain);
                     return -1;
