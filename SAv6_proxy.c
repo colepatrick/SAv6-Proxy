@@ -28,6 +28,7 @@ typedef int socket_t;
 #include <openssl/core_names.h>
 #include <openssl/params.h>
 #include <openssl/rand.h>
+#include <openssl/provider.h>
 
 #define MAGIC "SAV6PXY1"
 #define MAGIC_LEN 8
@@ -622,7 +623,7 @@ static int mlkem_master_handshake(socket_t s, unsigned char update_key[UPDATE_KE
 
     pctx = EVP_PKEY_CTX_new_from_name(NULL, "ML-KEM-768", NULL);
     if (!pctx || EVP_PKEY_fromdata_init(pctx) <= 0) goto done;
-    params[0] = OSSL_PARAM_construct_octet_string(OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY,
+    params[0] = OSSL_PARAM_construct_octet_string(OSSL_PKEY_PARAM_PUB_KEY,
                                                   (void *)body, body_len);
     params[1] = OSSL_PARAM_construct_end();
     if (EVP_PKEY_fromdata(pctx, &peer, EVP_PKEY_PUBLIC_KEY, params) <= 0) goto done;
@@ -732,12 +733,14 @@ static int establish_outstation_update_key(struct channel *ch, const unsigned ch
     int rc;
 
     if (parse_hello(payload, len, &alg, &body, &body_len) < 0) return -1;
-    if (ch->use_ml_kem) {
-        if (alg != ALG_MLKEM768 || body_len != 0) return -1;
+    /* Outstation dynamically chooses algorithm based on master's request, not local config */
+    if (alg == ALG_MLKEM768) {
+        if (body_len != 0) return -1;
         rc = mlkem_outstation_handshake(ch->secure_sock, update_key);
-    } else {
-        if (alg != ALG_ECDH_X25519) return -1;
+    } else if (alg == ALG_ECDH_X25519) {
         rc = ecdh_outstation_handshake(ch->secure_sock, body, body_len, update_key);
+    } else {
+        return -1;
     }
     if (rc < 0) {
         OPENSSL_cleanse(update_key, sizeof(update_key));
@@ -943,6 +946,7 @@ int main(int argc, char **argv)
     socket_t connected = INVALID_SOCKET;
     socket_t plain_sock = INVALID_SOCKET;
     struct channel ch;
+    OSSL_PROVIDER *provider = NULL;
     int rc = 1;
 
     if (parse_args(argc, argv, &cfg) < 0) {
@@ -951,6 +955,12 @@ int main(int argc, char **argv)
     }
     if (socket_init() != 0) {
         fprintf(stderr, "socket initialization failed\n");
+        return 1;
+    }
+    /* Load default provider for ML-KEM and other algorithms */
+    provider = OSSL_PROVIDER_load(NULL, "default");
+    if (!provider) {
+        fprintf(stderr, "Failed to load default provider\n");
         return 1;
     }
     OpenSSL_add_all_algorithms();
@@ -1023,6 +1033,7 @@ done:
     if (listener != INVALID_SOCKET) CLOSESOCK(listener);
     OPENSSL_cleanse(ch.session_key, sizeof(ch.session_key));
     OPENSSL_cleanse(ch.update_key, sizeof(ch.update_key));
+    if (provider) OSSL_PROVIDER_unload(provider);
     socket_done();
     return rc;
 }
