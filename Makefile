@@ -2,7 +2,7 @@ ifeq ($(origin CC),default)
 CC = gcc
 endif
 PROXY_SRC ?= SAv6_proxy.c
-STATION_SRC ?= plaintext_dnp3_station.c
+STATION_SRC ?= dummy_station.c
 
 CFLAGS ?= -Wall -Wextra
 
@@ -30,7 +30,7 @@ SOCKET_LDLIBS ?=
 endif
 
 PROXY_TARGET ?= SAv6_proxy$(EXEEXT)
-STATION_TARGET ?= plaintext_dnp3_station$(EXEEXT)
+STATION_TARGET ?= dummy_station$(EXEEXT)
 
 PROXY_CPPFLAGS = $(OPENSSL_CPPFLAGS)
 PROXY_LDFLAGS = $(OPENSSL_LDFLAGS)

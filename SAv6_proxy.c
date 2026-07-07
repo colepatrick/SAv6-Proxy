@@ -54,25 +54,36 @@ struct config {
     const char *listen_port;
     const char *connect_host;
     const char *connect_port;
+    uint64_t update_rekey_messages;
+    uint64_t session_rekey_messages;
 };
 
 struct channel {
     socket_t secure_sock;
+    int is_master;
+    int use_ml_kem;
     unsigned char session_key[SESSION_KEY_LEN];
+    unsigned char update_key[UPDATE_KEY_LEN];
     unsigned char send_nonce_prefix[4];
     uint64_t send_counter;
     uint64_t recv_counter;
+    uint64_t outbound_data_messages;
+    uint64_t messages_since_update_key;
+    uint64_t messages_since_session_key;
+    uint64_t update_rekey_messages;
+    uint64_t session_rekey_messages;
 };
 
 static void usage(const char *prog)
 {
     fprintf(stderr,
         "Usage:\n"
-        "  %s --mode master [--listen-host HOST] --listen-port PLAIN_PORT --connect-host PROXY_HOST --connect-port PROXY_PORT [--ml-kem]\n"
-        "  %s --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT [--ml-kem]\n\n"
+        "  %s --mode master [--listen-host HOST] --listen-port PLAIN_PORT --connect-host PROXY_HOST --connect-port PROXY_PORT [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]\n"
+        "  %s --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]\n\n"
         "Master mode listens for the local SAv5 program, then connects to the remote secure proxy.\n"
         "Outstation mode listens for the secure proxy, then connects to the local SAv5 program.\n"
-        "If --listen-host is omitted, the proxy listens on all local interfaces.\n",
+        "If --listen-host is omitted, the proxy listens on all local interfaces.\n"
+        "Rekey intervals default to 0, which disables automatic rekeying.\n",
         prog, prog);
 }
 
@@ -379,6 +390,9 @@ static void build_nonce(const unsigned char prefix[4], uint64_t counter,
     nonce[11] = (unsigned char)counter;
 }
 
+static int establish_outstation_update_key(struct channel *ch, const unsigned char *payload, uint32_t len);
+static int receive_outstation_session_key(struct channel *ch, const unsigned char *wrapped, uint32_t wrapped_len);
+
 static int send_encrypted(struct channel *ch, const unsigned char *plain, uint32_t plain_len)
 {
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
@@ -410,6 +424,11 @@ static int send_encrypted(struct channel *ch, const unsigned char *plain, uint32
     log_hex("AES-256-GCM tag", tag, GCM_TAG_LEN);
     printf("Sending encrypted frame payload bytes: %u\n", payload_len);
     ok = send_msg(ch->secure_sock, MSG_DATA, buf, payload_len);
+    if (ok == 0) {
+        ch->outbound_data_messages++;
+        ch->messages_since_update_key++;
+        ch->messages_since_session_key++;
+    }
 done:
     free(buf);
     EVP_CIPHER_CTX_free(ctx);
@@ -425,6 +444,7 @@ static int recv_encrypted(struct channel *ch, unsigned char **plain, uint32_t *p
     int len = 0, total = 0;
     int ok = -1;
 
+next_message:
     if (recv_msg(ch->secure_sock, &type, &payload, &payload_len) < 0) return -1;
     if (type == MSG_CLOSE) {
         printf("\nReceived encrypted close notification\n");
@@ -432,6 +452,22 @@ static int recv_encrypted(struct channel *ch, unsigned char **plain, uint32_t *p
         *plain = NULL;
         *plain_len = 0;
         return 1;
+    }
+    if (type == MSG_CLIENT_HELLO) {
+        if (ch->is_master) goto done;
+        log_step("Received runtime Update Key rekey request");
+        if (establish_outstation_update_key(ch, payload, payload_len) < 0) goto done;
+        free(payload);
+        payload = NULL;
+        goto next_message;
+    }
+    if (type == MSG_WRAPPED_SESSION) {
+        if (ch->is_master) goto done;
+        log_step("Received runtime Session Key rekey request");
+        if (receive_outstation_session_key(ch, payload, payload_len) < 0) goto done;
+        free(payload);
+        payload = NULL;
+        goto next_message;
     }
     if (type != MSG_DATA || payload_len < GCM_NONCE_LEN + GCM_TAG_LEN) goto done;
     if (payload_len > MAX_FRAME + GCM_NONCE_LEN + GCM_TAG_LEN) goto done;
@@ -456,6 +492,8 @@ static int recv_encrypted(struct channel *ch, unsigned char **plain, uint32_t *p
     log_hex("AES-256-GCM tag", payload + GCM_NONCE_LEN + *plain_len, GCM_TAG_LEN);
     log_hex("Decrypted plaintext", *plain, *plain_len);
     ch->recv_counter++;
+    ch->messages_since_update_key++;
+    ch->messages_since_session_key++;
     ok = 0;
 done:
     if (ok < 0) {
@@ -665,61 +703,132 @@ done:
     return ok;
 }
 
-static int master_handshake(socket_t s, int use_ml_kem, unsigned char session_key[SESSION_KEY_LEN])
+static int establish_master_update_key(struct channel *ch)
 {
     unsigned char update_key[UPDATE_KEY_LEN];
+    int rc;
+
+    if (ch->use_ml_kem) {
+        rc = mlkem_master_handshake(ch->secure_sock, update_key);
+    } else {
+        rc = ecdh_master_handshake(ch->secure_sock, update_key);
+    }
+    if (rc < 0) {
+        OPENSSL_cleanse(update_key, sizeof(update_key));
+        return -1;
+    }
+    memcpy(ch->update_key, update_key, UPDATE_KEY_LEN);
+    ch->messages_since_update_key = 0;
+    OPENSSL_cleanse(update_key, sizeof(update_key));
+    return 0;
+}
+
+static int establish_outstation_update_key(struct channel *ch, const unsigned char *payload, uint32_t len)
+{
+    unsigned char update_key[UPDATE_KEY_LEN];
+    uint8_t alg;
+    uint32_t body_len;
+    const unsigned char *body;
+    int rc;
+
+    if (parse_hello(payload, len, &alg, &body, &body_len) < 0) return -1;
+    if (ch->use_ml_kem) {
+        if (alg != ALG_MLKEM768 || body_len != 0) return -1;
+        rc = mlkem_outstation_handshake(ch->secure_sock, update_key);
+    } else {
+        if (alg != ALG_ECDH_X25519) return -1;
+        rc = ecdh_outstation_handshake(ch->secure_sock, body, body_len, update_key);
+    }
+    if (rc < 0) {
+        OPENSSL_cleanse(update_key, sizeof(update_key));
+        return -1;
+    }
+    memcpy(ch->update_key, update_key, UPDATE_KEY_LEN);
+    ch->messages_since_update_key = 0;
+    OPENSSL_cleanse(update_key, sizeof(update_key));
+    return 0;
+}
+
+static int establish_master_session_key(struct channel *ch)
+{
     unsigned char *wrapped = NULL;
     int wrapped_len = 0;
     int ok = -1;
 
-    if (use_ml_kem) {
-        if (mlkem_master_handshake(s, update_key) < 0) goto done;
-    } else {
-        if (ecdh_master_handshake(s, update_key) < 0) goto done;
-    }
     log_step("Master session key establishment");
-    if (RAND_bytes(session_key, SESSION_KEY_LEN) != 1) goto done;
-    log_hex("Generated AES-256-GCM session key", session_key, SESSION_KEY_LEN);
-    if (aes_wrap_key(update_key, session_key, &wrapped, &wrapped_len) < 0) goto done;
+    if (RAND_bytes(ch->session_key, SESSION_KEY_LEN) != 1) goto done;
+    log_hex("Generated AES-256-GCM session key", ch->session_key, SESSION_KEY_LEN);
+    if (aes_wrap_key(ch->update_key, ch->session_key, &wrapped, &wrapped_len) < 0) goto done;
     log_hex("AES Key Wrap output carrying session key", wrapped, (size_t)wrapped_len);
     printf("Sending WRAPPED_SESSION to outstation proxy\n");
-    if (send_msg(s, MSG_WRAPPED_SESSION, wrapped, (uint32_t)wrapped_len) < 0) goto done;
+    if (send_msg(ch->secure_sock, MSG_WRAPPED_SESSION, wrapped, (uint32_t)wrapped_len) < 0) goto done;
+    ch->send_counter = 0;
+    ch->messages_since_session_key = 0;
     ok = 0;
 done:
-    OPENSSL_cleanse(update_key, sizeof(update_key));
     free(wrapped);
     return ok;
 }
 
-static int outstation_handshake(socket_t s, int use_ml_kem, unsigned char session_key[SESSION_KEY_LEN])
+static int receive_outstation_session_key(struct channel *ch, const unsigned char *wrapped, uint32_t wrapped_len)
 {
-    unsigned char update_key[UPDATE_KEY_LEN];
-    unsigned char *payload = NULL, *wrapped = NULL;
-    uint8_t type, alg;
-    uint32_t len, body_len, wrapped_len;
-    const unsigned char *body;
-    int ok = -1;
-
-    if (recv_msg(s, &type, &payload, &len) < 0) goto done;
-    if (type != MSG_CLIENT_HELLO || parse_hello(payload, len, &alg, &body, &body_len) < 0) goto done;
-    if (use_ml_kem) {
-        if (alg != ALG_MLKEM768 || body_len != 0) goto done;
-        if (mlkem_outstation_handshake(s, update_key) < 0) goto done;
-    } else {
-        if (alg != ALG_ECDH_X25519) goto done;
-        if (ecdh_outstation_handshake(s, body, body_len, update_key) < 0) goto done;
-    }
-    free(payload);
-    payload = NULL;
-    if (recv_msg(s, &type, &wrapped, &wrapped_len) < 0) goto done;
-    if (type != MSG_WRAPPED_SESSION) goto done;
     log_step("Outstation session key establishment");
     log_hex("Received AES Key Wrap payload", wrapped, wrapped_len);
-    if (aes_unwrap_key(update_key, wrapped, (int)wrapped_len, session_key) < 0) goto done;
-    log_hex("Unwrapped AES-256-GCM session key", session_key, SESSION_KEY_LEN);
+    if (aes_unwrap_key(ch->update_key, wrapped, (int)wrapped_len, ch->session_key) < 0) return -1;
+    log_hex("Unwrapped AES-256-GCM session key", ch->session_key, SESSION_KEY_LEN);
+    ch->recv_counter = 0;
+    ch->messages_since_session_key = 0;
+    return 0;
+}
+
+static int maybe_master_rekey(struct channel *ch)
+{
+    if (!ch->is_master) return 0;
+
+    if (ch->update_rekey_messages &&
+        ch->messages_since_update_key >= ch->update_rekey_messages) {
+        log_step("Automatic Update Key rekey trigger");
+        printf("Protected data frames since Update Key: %llu; threshold: %llu\n",
+               (unsigned long long)ch->messages_since_update_key,
+               (unsigned long long)ch->update_rekey_messages);
+        if (establish_master_update_key(ch) < 0) return -1;
+    }
+
+    if (ch->session_rekey_messages &&
+        ch->messages_since_session_key >= ch->session_rekey_messages) {
+        log_step("Automatic Session Key rekey trigger");
+        printf("Protected data frames since Session Key: %llu; threshold: %llu\n",
+               (unsigned long long)ch->messages_since_session_key,
+               (unsigned long long)ch->session_rekey_messages);
+        if (establish_master_session_key(ch) < 0) return -1;
+    }
+
+    return 0;
+}
+
+static int master_handshake(struct channel *ch)
+{
+    if (establish_master_update_key(ch) < 0) return -1;
+    return establish_master_session_key(ch);
+}
+
+static int outstation_handshake(struct channel *ch)
+{
+    unsigned char *payload = NULL, *wrapped = NULL;
+    uint8_t type;
+    uint32_t len, wrapped_len;
+    int ok = -1;
+
+    if (recv_msg(ch->secure_sock, &type, &payload, &len) < 0) goto done;
+    if (type != MSG_CLIENT_HELLO) goto done;
+    if (establish_outstation_update_key(ch, payload, len) < 0) goto done;
+    free(payload);
+    payload = NULL;
+    if (recv_msg(ch->secure_sock, &type, &wrapped, &wrapped_len) < 0) goto done;
+    if (type != MSG_WRAPPED_SESSION) goto done;
+    if (receive_outstation_session_key(ch, wrapped, wrapped_len) < 0) goto done;
     ok = 0;
 done:
-    OPENSSL_cleanse(update_key, sizeof(update_key));
     free(payload);
     free(wrapped);
     return ok;
@@ -746,6 +855,9 @@ static int relay(socket_t plain_sock, struct channel *ch)
                 done = 1;
             } else {
                 printf("\nPlaintext -> secure: received %d plaintext bytes from local endpoint\n", n);
+                if (maybe_master_rekey(ch) < 0) {
+                    return -1;
+                }
                 if (send_encrypted(ch, buf, (uint32_t)n) < 0) {
                     return -1;
                 }
@@ -775,6 +887,19 @@ static int relay(socket_t plain_sock, struct channel *ch)
     return 0;
 }
 
+static int parse_u64_arg(const char *s, uint64_t *out)
+{
+    char *end = NULL;
+    unsigned long long v;
+
+    if (!s || !s[0]) return -1;
+    errno = 0;
+    v = strtoull(s, &end, 10);
+    if (errno || *end) return -1;
+    *out = (uint64_t)v;
+    return 0;
+}
+
 static int parse_args(int argc, char **argv, struct config *cfg)
 {
     int i;
@@ -797,6 +922,10 @@ static int parse_args(int argc, char **argv, struct config *cfg)
             cfg->connect_port = argv[++i];
         } else if (strcmp(argv[i], "--ml-kem") == 0) {
             cfg->use_ml_kem = 1;
+        } else if (strcmp(argv[i], "--update-rekey-messages") == 0 && i + 1 < argc) {
+            if (parse_u64_arg(argv[++i], &cfg->update_rekey_messages) < 0) return -1;
+        } else if (strcmp(argv[i], "--session-rekey-messages") == 0 && i + 1 < argc) {
+            if (parse_u64_arg(argv[++i], &cfg->session_rekey_messages) < 0) return -1;
         } else if (strcmp(argv[i], "--help") == 0) {
             return -1;
         } else {
@@ -826,6 +955,18 @@ int main(int argc, char **argv)
     }
     OpenSSL_add_all_algorithms();
     memset(&ch, 0, sizeof(ch));
+    ch.is_master = cfg.is_master;
+    ch.use_ml_kem = cfg.use_ml_kem;
+    ch.update_rekey_messages = cfg.update_rekey_messages;
+    ch.session_rekey_messages = cfg.session_rekey_messages;
+    if (ch.update_rekey_messages) {
+        printf("automatic Update Key rekey after every %llu protected data frames observed by master relay\n",
+               (unsigned long long)ch.update_rekey_messages);
+    }
+    if (ch.session_rekey_messages) {
+        printf("automatic Session Key rekey after every %llu protected data frames observed by master relay\n",
+               (unsigned long long)ch.session_rekey_messages);
+    }
 
     if (cfg.is_master) {
         memcpy(ch.send_nonce_prefix, "SAm0", 4);
@@ -847,7 +988,7 @@ int main(int argc, char **argv)
             goto done;
         }
         ch.secure_sock = connected;
-        if (master_handshake(ch.secure_sock, cfg.use_ml_kem, ch.session_key) < 0) die_ssl("master handshake");
+        if (master_handshake(&ch) < 0) die_ssl("master handshake");
     } else {
         memcpy(ch.send_nonce_prefix, "SAo0", 4);
         listener = listen_tcp(cfg.listen_host, cfg.listen_port);
@@ -862,7 +1003,7 @@ int main(int argc, char **argv)
         if (accepted == INVALID_SOCKET) goto done;
         ch.secure_sock = accepted;
 
-        if (outstation_handshake(ch.secure_sock, cfg.use_ml_kem, ch.session_key) < 0) die_ssl("outstation handshake");
+        if (outstation_handshake(&ch) < 0) die_ssl("outstation handshake");
         connected = connect_tcp(cfg.connect_host, cfg.connect_port);
         if (connected == INVALID_SOCKET) {
             fprintf(stderr, "failed to connect to local SAv5 endpoint %s:%s\n", cfg.connect_host, cfg.connect_port);
@@ -881,6 +1022,7 @@ done:
     if (ch.secure_sock != INVALID_SOCKET && ch.secure_sock != connected && ch.secure_sock != accepted) CLOSESOCK(ch.secure_sock);
     if (listener != INVALID_SOCKET) CLOSESOCK(listener);
     OPENSSL_cleanse(ch.session_key, sizeof(ch.session_key));
+    OPENSSL_cleanse(ch.update_key, sizeof(ch.update_key));
     socket_done();
     return rc;
 }
