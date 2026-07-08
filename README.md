@@ -164,8 +164,8 @@ On Windows, add `.exe` to the program names:
 
 ```powershell
 .\dummy_station.exe --role outstation --listen-host 127.0.0.1 --listen-port 20001
-.\SAv6_proxy.exe --mode outstation --listen-host 127.0.0.1 --listen-port 20000 --connect-host 127.0.0.1 --connect-port 20001
-.\SAv6_proxy.exe --mode master --listen-host 127.0.0.1 --listen-port 19999 --connect-host 127.0.0.1 --connect-port 20000
+.\SAv6_proxy.exe --mode outstation --listen-host 127.0.0.1 --listen-port 20000 --connect-host 127.0.0.1 --connect-port 20001 --update-rekey-messages 10 --session-rekey-messages 3
+.\SAv6_proxy.exe --mode master --listen-host 127.0.0.1 --listen-port 19999 --connect-host 127.0.0.1 --connect-port 20000 --update-rekey-messages 10 --session-rekey-messages 3
 .\dummy_station.exe --role master --connect-host 127.0.0.1 --connect-port 19999 --count 5
 ```
 
@@ -192,7 +192,7 @@ Add matching rekey settings to both proxy commands:
 Then send several dummy messages:
 
 ```sh
-./dummy_station --role master --connect-host 127.0.0.1 --connect-port 19999 --count 5 --message DNP3_REKEY_TEST
+./dummy_station --role master --connect-host 127.0.0.1 --connect-port 19999 --count 15 --message DNP3_REKEY_TEST
 ```
 
 The proxy terminal output will show new Update Key handshakes and new Session Key establishment events.
