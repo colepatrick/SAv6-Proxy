@@ -145,19 +145,19 @@ Start the dummy outstation:
 Start the outstation-side proxy:
 
 ```sh
-./SAv6_proxy --mode outstation --listen-host 127.0.0.1 --listen-port 20000 --connect-host 127.0.0.1 --connect-port 20001
+./SAv6_proxy --mode outstation --listen-host 127.0.0.1 --listen-port 20000 --connect-host 127.0.0.1 --connect-port 20001 --update-rekey-messages 10 --session-rekey-messages 3
 ```
 
 Start the master-side proxy:
 
 ```sh
-./SAv6_proxy --mode master --listen-host 127.0.0.1 --listen-port 19999 --connect-host 127.0.0.1 --connect-port 20000
+./SAv6_proxy --mode master --listen-host 127.0.0.1 --listen-port 19999 --connect-host 127.0.0.1 --connect-port 20000 --update-rekey-messages 10 --session-rekey-messages 3
 ```
 
 Start the dummy master:
 
 ```sh
-./dummy_station --role master --connect-host 127.0.0.1 --connect-port 19999 --count 5
+./dummy_station --role master --connect-host 127.0.0.1 --connect-port 19999 --count 15
 ```
 
 On Windows, add `.exe` to the program names:
@@ -185,8 +185,8 @@ Both sides must agree. Do not run one proxy with `--ml-kem` and the other withou
 Add matching rekey settings to both proxy commands:
 
 ```sh
-./SAv6_proxy --mode outstation --listen-host 127.0.0.1 --listen-port 20000 --connect-host 127.0.0.1 --connect-port 20001 --update-rekey-messages 2 --session-rekey-messages 3
-./SAv6_proxy --mode master --listen-host 127.0.0.1 --listen-port 19999 --connect-host 127.0.0.1 --connect-port 20000 --update-rekey-messages 2 --session-rekey-messages 3
+./SAv6_proxy --mode outstation --listen-host 127.0.0.1 --listen-port 20000 --connect-host 127.0.0.1 --connect-port 20001 --update-rekey-messages 10 --session-rekey-messages 3
+./SAv6_proxy --mode master --listen-host 127.0.0.1 --listen-port 19999 --connect-host 127.0.0.1 --connect-port 20000 --update-rekey-messages 10 --session-rekey-messages 3
 ```
 
 Then send several dummy messages:
