@@ -38,6 +38,11 @@ struct config {
     unsigned int interval_ms;
 };
 
+/*
+ * Simple plaintext-only test harness for exercising the SAv6 proxy.
+ * The dummy master sends test payloads and waits for plaintext acknowledgments.
+ * The dummy outstation listens for plaintext and responds with a fixed ACK.
+ */
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -79,6 +84,9 @@ static int send_all(socket_t s, const void *buf, size_t len)
     return 0;
 }
 
+/*
+ * Create a TCP connection to the specified host and port.
+ */
 static socket_t connect_tcp(const char *host, const char *port)
 {
     struct addrinfo hints;
@@ -101,6 +109,9 @@ static socket_t connect_tcp(const char *host, const char *port)
     return s;
 }
 
+/*
+ * Create a listening TCP socket on the specified host and port.
+ */
 static socket_t listen_tcp(const char *host, const char *port)
 {
     struct addrinfo hints;
@@ -126,6 +137,9 @@ static socket_t listen_tcp(const char *host, const char *port)
     return s;
 }
 
+/*
+ * Print received plaintext in a readable way, escaping non-printable bytes.
+ */
 static void print_plaintext(const unsigned char *buf, int len)
 {
     int i;
@@ -143,6 +157,9 @@ static void print_plaintext(const unsigned char *buf, int len)
     if (len == 0 || buf[len - 1] != '\n') putchar('\n');
 }
 
+/*
+ * Wait for a plaintext response from the peer with a timeout.
+ */
 static int wait_for_response(socket_t s, unsigned int timeout_ms)
 {
     fd_set rfds;
@@ -163,6 +180,9 @@ static int wait_for_response(socket_t s, unsigned int timeout_ms)
     return 1;
 }
 
+/*
+ * Dummy master: connect to the proxy and send plaintext test messages.
+ */
 static int run_master(const struct config *cfg)
 {
     socket_t s;
@@ -201,6 +221,9 @@ static int run_master(const struct config *cfg)
     return 0;
 }
 
+/*
+ * Dummy outstation: listen for a proxy connection and echo back plaintext ACKs.
+ */
 static int run_outstation(const struct config *cfg)
 {
     socket_t listener, client;
@@ -243,24 +266,31 @@ static int run_outstation(const struct config *cfg)
     return 0;
 }
 
+/*
+ * Parse a positive integer argument from the command line.
+ */
 static int parse_int(const char *s, int *out)
-{
-    char *end = NULL;
+{    char *end = NULL;
     long v = strtol(s, &end, 10);
     if (!s[0] || *end || v <= 0 || v > 1000000L) return -1;
     *out = (int)v;
     return 0;
 }
 
+/*
+ * Parse a positive unsigned integer argument from the command line.
+ */
 static int parse_uint(const char *s, unsigned int *out)
-{
-    char *end = NULL;
+{    char *end = NULL;
     unsigned long v = strtoul(s, &end, 10);
     if (!s[0] || *end || v > 3600000UL) return -1;
     *out = (unsigned int)v;
     return 0;
 }
 
+/*
+ * Parse command-line arguments for the dummy station.
+ */
 static int parse_args(int argc, char **argv, struct config *cfg)
 {
     int i;
@@ -302,6 +332,9 @@ static int parse_args(int argc, char **argv, struct config *cfg)
     return cfg->listen_port ? 0 : -1;
 }
 
+/*
+ * Entry point for the plaintext dummy station.
+ */
 int main(int argc, char **argv)
 {
     struct config cfg;

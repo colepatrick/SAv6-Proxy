@@ -48,6 +48,13 @@ typedef int socket_t;
 #define GCM_TAG_LEN 16
 #define MAX_FRAME 65536u
 
+/*
+ * Protocol constants and role configuration.
+ * The proxy can operate in two modes: master-side relay or outstation-side relay.
+ * The master side accepts plaintext from a local SAv5 client and connects to the
+ * secure proxy endpoint. The outstation side accepts the secure proxy connection
+ * and connects to the local plaintext SAv5 server.
+ */
 struct config {
     int is_master;
     int use_ml_kem;
@@ -75,6 +82,11 @@ struct channel {
     uint64_t session_rekey_messages;
 };
 
+/*
+ * `channel` tracks the current secure session state for one side of the relay.
+ * `session_key` is used for AES-256-GCM frame encryption/decryption.
+ * `update_key` is used for encrypting session key updates with AES key wrap.
+ */
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -124,6 +136,10 @@ static void socket_done(void)
 #endif
 }
 
+/*
+ * Ensure a complete buffer is written on the socket. This is required because
+ * send() may deliver fewer bytes than requested on a single call.
+ */
 static int send_all(socket_t s, const void *buf, size_t len)
 {
     const unsigned char *p = (const unsigned char *)buf;
@@ -235,6 +251,11 @@ static socket_t listen_tcp(const char *host, const char *port)
     return s;
 }
 
+/*
+ * Derive a fixed-length update key from a shared secret using HKDF-SHA256.
+ * The derived key is used to encrypt session key updates and to protect
+ * subsequent data-plane traffic.
+ */
 static int hkdf_sha256(const unsigned char *secret, size_t secret_len,
                        const char *info, unsigned char out[UPDATE_KEY_LEN])
 {
@@ -258,6 +279,9 @@ done:
     return ok ? 0 : -1;
 }
 
+/*
+ * Generate a fresh X25519 key pair for the ECDH-based update-key handshake.
+ */
 static EVP_PKEY *make_x25519_key(void)
 {
     EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, NULL);
@@ -299,6 +323,10 @@ static int get_raw_priv(EVP_PKEY *key, unsigned char **priv, size_t *priv_len)
     return 0;
 }
 
+/*
+ * Derive the shared secret with a peer X25519 public key, then HKDF it into
+ * the runtime update key used for AES key wrapping.
+ */
 static int derive_x25519(EVP_PKEY *priv, const unsigned char *peer_pub, size_t peer_pub_len,
                          unsigned char update_key[UPDATE_KEY_LEN])
 {
@@ -330,6 +358,14 @@ done:
     return ok ? 0 : -1;
 }
 
+/*
+ * Wrap the session key using AES-KW with the previously established update key.
+ * The wrapped session key is sent as a protected WRAPPED_SESSION frame.
+ */
+/*
+ * Wrap the newly generated AES session key using the currently active update key.
+ * The wrapped output is sent to the remote peer as a protected session-key frame.
+ */
 static int aes_wrap_key(const unsigned char update_key[UPDATE_KEY_LEN],
                         const unsigned char session_key[SESSION_KEY_LEN],
                         unsigned char **wrapped, int *wrapped_len)
@@ -353,6 +389,10 @@ fail:
     return -1;
 }
 
+/*
+ * Unwrap a protected session key received from the master, using the active
+ * update key to recover the AES-256-GCM key for decrypting data frames.
+ */
 static int aes_unwrap_key(const unsigned char update_key[UPDATE_KEY_LEN],
                           const unsigned char *wrapped, int wrapped_len,
                           unsigned char session_key[SESSION_KEY_LEN])
@@ -377,6 +417,10 @@ done:
     return ok ? 0 : -1;
 }
 
+/*
+ * Construct a 12-byte AES-GCM nonce from a 4-byte prefix and an 8-byte counter.
+ * The prefix is role-specific so each direction uses a distinct nonce namespace.
+ */
 static void build_nonce(const unsigned char prefix[4], uint64_t counter,
                         unsigned char nonce[GCM_NONCE_LEN])
 {
@@ -394,6 +438,10 @@ static void build_nonce(const unsigned char prefix[4], uint64_t counter,
 static int establish_outstation_update_key(struct channel *ch, const unsigned char *payload, uint32_t len);
 static int receive_outstation_session_key(struct channel *ch, const unsigned char *wrapped, uint32_t wrapped_len);
 
+/*
+ * Encrypt a plaintext message using the current session key and send it as
+ * a MSG_DATA frame over the secure channel.
+ */
 static int send_encrypted(struct channel *ch, const unsigned char *plain, uint32_t plain_len)
 {
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
@@ -436,6 +484,10 @@ done:
     return ok;
 }
 
+/*
+ * Receive a secure frame from the peer, handle control frames such as
+ * rekey and close notifications, and decrypt MSG_DATA frames to plaintext.
+ */
 static int recv_encrypted(struct channel *ch, unsigned char **plain, uint32_t *plain_len)
 {
     EVP_CIPHER_CTX *ctx = NULL;
@@ -507,6 +559,10 @@ done:
     return ok;
 }
 
+/*
+ * Send a framed hello message. The frame includes the protocol magic, version,
+ * algorithm identifier, and an optional payload body.
+ */
 static int send_hello(socket_t s, uint8_t type, uint8_t alg,
                       const unsigned char *body, uint32_t body_len)
 {
@@ -532,6 +588,9 @@ static int send_server_hello(socket_t s, uint8_t alg, const unsigned char *body,
     return send_hello(s, MSG_SERVER_HELLO, alg, body, body_len);
 }
 
+/*
+ * Parse the initial hello frame header and extract the algorithm and body.
+ */
 static int parse_hello(const unsigned char *p, uint32_t len, uint8_t *alg,
                        const unsigned char **body, uint32_t *body_len)
 {
@@ -543,6 +602,10 @@ static int parse_hello(const unsigned char *p, uint32_t len, uint8_t *alg,
     return 0;
 }
 
+/*
+ * Master initiates the ECDH update-key handshake, sends its X25519 public key,
+ * and derives the shared update key after receiving the peer public key.
+ */
 static int ecdh_master_handshake(socket_t s, unsigned char update_key[UPDATE_KEY_LEN])
 {
     EVP_PKEY *key = make_x25519_key();
@@ -574,6 +637,10 @@ done:
     return ok;
 }
 
+/*
+ * Outstation responds to an ECDH CLIENT_HELLO by generating its own key pair,
+ * sending SERVER_HELLO, and deriving the shared update key.
+ */
 static int ecdh_outstation_handshake(socket_t s, const unsigned char *client_pub,
                                      uint32_t client_pub_len,
                                      unsigned char update_key[UPDATE_KEY_LEN])
@@ -600,6 +667,10 @@ done:
     return ok;
 }
 
+/*
+ * Master requests ML-KEM-768 from the peer, imports the returned public key,
+ * performs encapsulation, and derives the shared update key from the secret.
+ */
 static int mlkem_master_handshake(socket_t s, unsigned char update_key[UPDATE_KEY_LEN])
 {
     EVP_PKEY *peer = NULL;
@@ -652,6 +723,10 @@ done:
     return ok;
 }
 
+/*
+ * Outstation generates an ML-KEM-768 key pair, sends the public key, then
+ * decapsulates the ciphertext received from the master to derive the shared key.
+ */
 static int mlkem_outstation_handshake(socket_t s, unsigned char update_key[UPDATE_KEY_LEN])
 {
     EVP_PKEY *key = NULL;
@@ -704,6 +779,10 @@ done:
     return ok;
 }
 
+/*
+ * Establish or re-establish the update key from the master side.
+ * This may use either X25519 or ML-KEM depending on the current configuration.
+ */
 static int establish_master_update_key(struct channel *ch)
 {
     unsigned char update_key[UPDATE_KEY_LEN];
@@ -837,6 +916,10 @@ done:
     return ok;
 }
 
+/*
+ * Main relay loop: forward plaintext from the local endpoint to the secure peer
+ * and decrypt/forward secure frames from the peer back to the local endpoint.
+ */
 static int relay(socket_t plain_sock, struct channel *ch)
 {
     fd_set rfds;
@@ -890,6 +973,9 @@ static int relay(socket_t plain_sock, struct channel *ch)
     return 0;
 }
 
+/*
+ * Parse an unsigned 64-bit integer from a command-line argument.
+ */
 static int parse_u64_arg(const char *s, uint64_t *out)
 {
     char *end = NULL;
@@ -903,6 +989,9 @@ static int parse_u64_arg(const char *s, uint64_t *out)
     return 0;
 }
 
+/*
+ * Command-line parsing for mode, host/port configuration, and rekey settings.
+ */
 static int parse_args(int argc, char **argv, struct config *cfg)
 {
     int i;
@@ -938,6 +1027,10 @@ static int parse_args(int argc, char **argv, struct config *cfg)
     return (mode_set && cfg->listen_port && cfg->connect_host && cfg->connect_port) ? 0 : -1;
 }
 
+/*
+ * Entry point for the SAv6 proxy. Sets up socket state, loads OpenSSL providers,
+ * negotiates secure sessions, and begins relaying plaintext and encrypted traffic.
+ */
 int main(int argc, char **argv)
 {
     struct config cfg;
@@ -979,6 +1072,10 @@ int main(int argc, char **argv)
     }
 
     if (cfg.is_master) {
+        /*
+         * Master mode: accept plaintext from the local SAv5 client, connect to
+         * the remote secure peer, perform the secure handshake, then relay.
+         */
         memcpy(ch.send_nonce_prefix, "SAm0", 4);
         listener = listen_tcp(cfg.listen_host, cfg.listen_port);
         if (listener == INVALID_SOCKET) {
