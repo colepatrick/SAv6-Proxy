@@ -100,12 +100,18 @@ static void usage(const char *prog)
         prog, prog);
 }
 
+/*
+ * Abort execution with a simple SSL-related error message.
+ */
 static void die_ssl(const char *what)
 {
     fprintf(stderr, "%s failed\n", what);
     exit(1);
 }
 
+/*
+ * Print a buffer in hex for debugging of keys, nonces, ciphertext, and tags.
+ */
 static void log_hex(const char *label, const unsigned char *buf, size_t len)
 {
     size_t i;
@@ -114,11 +120,18 @@ static void log_hex(const char *label, const unsigned char *buf, size_t len)
     putchar('\n');
 }
 
+/*
+ * Emit a labeled step marker in console output for tracing handshake and relay progress.
+ */
 static void log_step(const char *label)
 {
     printf("\n=== %s ===\n", label);
 }
 
+/*
+ * Initialize the platform socket subsystem if needed.
+ * On Windows this starts Winsock; on Unix-like systems no initialization is required.
+ */
 static int socket_init(void)
 {
 #ifdef _WIN32
@@ -129,6 +142,9 @@ static int socket_init(void)
 #endif
 }
 
+/*
+ * Cleanup platform socket state on Windows; no-op on Unix-like systems.
+ */
 static void socket_done(void)
 {
 #ifdef _WIN32
@@ -152,6 +168,10 @@ static int send_all(socket_t s, const void *buf, size_t len)
     return 0;
 }
 
+/*
+ * Read exactly `len` bytes from a socket, retrying until the requested amount
+ * has been received or an error occurs.
+ */
 static int recv_all(socket_t s, void *buf, size_t len)
 {
     unsigned char *p = (unsigned char *)buf;
@@ -164,6 +184,9 @@ static int recv_all(socket_t s, void *buf, size_t len)
     return 0;
 }
 
+/*
+ * Send and receive 32-bit big-endian length values used in the framed protocol.
+ */
 static int send_u32(socket_t s, uint32_t v)
 {
     uint32_t n = htonl(v);
@@ -178,6 +201,10 @@ static int recv_u32(socket_t s, uint32_t *v)
     return 0;
 }
 
+/*
+ * Send a protocol frame with a one-byte message type, a 32-bit payload length,
+ * and optional payload data.
+ */
 static int send_msg(socket_t s, uint8_t type, const void *payload, uint32_t len)
 {
     if (send_all(s, &type, 1) < 0) return -1;
@@ -186,6 +213,10 @@ static int send_msg(socket_t s, uint8_t type, const void *payload, uint32_t len)
     return 0;
 }
 
+/*
+ * Receive a framed message and return its type and payload buffer. The caller
+ * takes ownership of the allocated payload buffer.
+ */
 static int recv_msg(socket_t s, uint8_t *type, unsigned char **payload, uint32_t *len)
 {
     if (recv_all(s, type, 1) < 0) return -1;
@@ -204,6 +235,10 @@ static int recv_msg(socket_t s, uint8_t *type, unsigned char **payload, uint32_t
     return 0;
 }
 
+/*
+ * Connect to a TCP peer by resolving the host and port and trying each
+ * returned address until a connection succeeds.
+ */
 static socket_t connect_tcp(const char *host, const char *port)
 {
     struct addrinfo hints;
@@ -226,6 +261,10 @@ static socket_t connect_tcp(const char *host, const char *port)
     return s;
 }
 
+/*
+ * Bind and listen on a TCP port. If host is NULL the socket listens on all
+ * local addresses.
+ */
 static socket_t listen_tcp(const char *host, const char *port)
 {
     struct addrinfo hints;
@@ -297,6 +336,9 @@ done:
     return key;
 }
 
+/*
+ * Extract the raw public key bytes from an EVP_PKEY into a newly allocated buffer.
+ */
 static int get_raw_pub(EVP_PKEY *key, unsigned char **pub, size_t *pub_len)
 {
     if (EVP_PKEY_get_raw_public_key(key, NULL, pub_len) <= 0) return -1;
@@ -310,6 +352,10 @@ static int get_raw_pub(EVP_PKEY *key, unsigned char **pub, size_t *pub_len)
     return 0;
 }
 
+/*
+ * Extract the raw private key bytes from an EVP_PKEY into a newly allocated buffer.
+ * The raw private key is used only for logging/debug visibility and is immediately cleansed.
+ */
 static int get_raw_priv(EVP_PKEY *key, unsigned char **priv, size_t *priv_len)
 {
     if (EVP_PKEY_get_raw_private_key(key, NULL, priv_len) <= 0) return -1;
@@ -578,6 +624,10 @@ static int send_hello(socket_t s, uint8_t type, uint8_t alg,
     return rc;
 }
 
+/*
+ * Convenience wrappers for the HELLO control messages used during the
+ * secure handshake.
+ */
 static int send_client_hello(socket_t s, uint8_t alg, const unsigned char *body, uint32_t body_len)
 {
     return send_hello(s, MSG_CLIENT_HELLO, alg, body, body_len);
@@ -589,7 +639,7 @@ static int send_server_hello(socket_t s, uint8_t alg, const unsigned char *body,
 }
 
 /*
- * Parse the initial hello frame header and extract the algorithm and body.
+ * Parse the HELLO frame header and extract the negotiated algorithm and body payload.
  */
 static int parse_hello(const unsigned char *p, uint32_t len, uint8_t *alg,
                        const unsigned char **body, uint32_t *body_len)
@@ -780,8 +830,8 @@ done:
 }
 
 /*
- * Establish or re-establish the update key from the master side.
- * This may use either X25519 or ML-KEM depending on the current configuration.
+ * Establish or re-establish the runtime update key on the master side.
+ * This either performs X25519 ECDH or ML-KEM-768 based on the current flag.
  */
 static int establish_master_update_key(struct channel *ch)
 {
@@ -803,6 +853,11 @@ static int establish_master_update_key(struct channel *ch)
     return 0;
 }
 
+/*
+ * Complete the outstation-side update-key handshake after receiving the
+ * initial CLIENT_HELLO. The outstation chooses the algorithm requested by the
+ * master, performs the corresponding handshake, and stores the derived update key.
+ */
 static int establish_outstation_update_key(struct channel *ch, const unsigned char *payload, uint32_t len)
 {
     unsigned char update_key[UPDATE_KEY_LEN];
@@ -831,6 +886,10 @@ static int establish_outstation_update_key(struct channel *ch, const unsigned ch
     return 0;
 }
 
+/*
+ * Generate a fresh AES-256-GCM session key on the master and securely
+ * transmit it to the outstation using the previously established update key.
+ */
 static int establish_master_session_key(struct channel *ch)
 {
     unsigned char *wrapped = NULL;
@@ -852,6 +911,10 @@ done:
     return ok;
 }
 
+/*
+ * Unwrap the session key delivered by the master using the currently active
+ * update key and begin using it for AES-256-GCM traffic decryption.
+ */
 static int receive_outstation_session_key(struct channel *ch, const unsigned char *wrapped, uint32_t wrapped_len)
 {
     log_step("Outstation session key establishment");
@@ -863,6 +926,10 @@ static int receive_outstation_session_key(struct channel *ch, const unsigned cha
     return 0;
 }
 
+/*
+ * Check if the master relay should trigger an automatic rekey based on the
+ * configured frame thresholds. Only the master side manages automatic rekey.
+ */
 static int maybe_master_rekey(struct channel *ch)
 {
     if (!ch->is_master) return 0;
@@ -894,6 +961,11 @@ static int master_handshake(struct channel *ch)
     return establish_master_session_key(ch);
 }
 
+/*
+ * Perform the outstation side of the initial secure handshake.
+ * The outstation first handles the CLIENT_HELLO, establishes the update key,
+ * then receives and unwraps the wrapped session key.
+ */
 static int outstation_handshake(struct channel *ch)
 {
     unsigned char *payload = NULL, *wrapped = NULL;
@@ -974,7 +1046,7 @@ static int relay(socket_t plain_sock, struct channel *ch)
 }
 
 /*
- * Parse an unsigned 64-bit integer from a command-line argument.
+ * Parse an unsigned 64-bit integer from a command line argument.
  */
 static int parse_u64_arg(const char *s, uint64_t *out)
 {
@@ -990,7 +1062,8 @@ static int parse_u64_arg(const char *s, uint64_t *out)
 }
 
 /*
- * Command-line parsing for mode, host/port configuration, and rekey settings.
+ * Parse command-line arguments for proxy mode, host/port bindings, ML-KEM
+ * selection, and optional rekey thresholds.
  */
 static int parse_args(int argc, char **argv, struct config *cfg)
 {
@@ -1097,6 +1170,10 @@ int main(int argc, char **argv)
         ch.secure_sock = connected;
         if (master_handshake(&ch) < 0) die_ssl("master handshake");
     } else {
+        /*
+         * Outstation mode: accept the secure proxy connection and then connect
+         * to the local plaintext SAv5 endpoint once the secure handshake is done.
+         */
         memcpy(ch.send_nonce_prefix, "SAo0", 4);
         listener = listen_tcp(cfg.listen_host, cfg.listen_port);
         if (listener == INVALID_SOCKET) {

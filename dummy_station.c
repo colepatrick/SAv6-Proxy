@@ -10,6 +10,10 @@
 #include <ws2tcpip.h>
 typedef SOCKET socket_t;
 #define CLOSESOCK closesocket
+/*
+ * Cross-platform millisecond sleep helper used by the dummy master between
+ * test messages.
+ */
 static void sleep_ms(unsigned int ms) { Sleep(ms); }
 #else
 #include <arpa/inet.h>
@@ -21,6 +25,10 @@ typedef int socket_t;
 #define INVALID_SOCKET (-1)
 #define SOCKET_ERROR (-1)
 #define CLOSESOCK close
+/*
+ * Cross-platform millisecond sleep helper used by the dummy master between
+ * test messages.
+ */
 static void sleep_ms(unsigned int ms) { usleep(ms * 1000); }
 #endif
 
@@ -55,6 +63,9 @@ static void usage(const char *prog)
         prog, prog);
 }
 
+/*
+ * Initialize sockets on Windows and do nothing on Unix-like systems.
+ */
 static int socket_init(void)
 {
 #ifdef _WIN32
@@ -65,6 +76,9 @@ static int socket_init(void)
 #endif
 }
 
+/*
+ * Cleanup platform socket state on Windows; no-op on Unix-like systems.
+ */
 static void socket_done(void)
 {
 #ifdef _WIN32
@@ -72,6 +86,9 @@ static void socket_done(void)
 #endif
 }
 
+/*
+ * Send an entire buffer over TCP, retrying until all bytes are transmitted.
+ */
 static int send_all(socket_t s, const void *buf, size_t len)
 {
     const unsigned char *p = (const unsigned char *)buf;
@@ -289,7 +306,9 @@ static int parse_uint(const char *s, unsigned int *out)
 }
 
 /*
- * Parse command-line arguments for the dummy station.
+ * Parse command-line arguments for the dummy master/outstation.
+ * The master role requires a target host/port, while outstation only needs a
+ * listening port. Message, count, and interval are optional test parameters.
  */
 static int parse_args(int argc, char **argv, struct config *cfg)
 {
@@ -333,7 +352,8 @@ static int parse_args(int argc, char **argv, struct config *cfg)
 }
 
 /*
- * Entry point for the plaintext dummy station.
+ * Entry point for the dummy station. It initializes sockets, parses the CLI,
+ * and dispatches either the master or outstation behavior.
  */
 int main(int argc, char **argv)
 {
