@@ -87,7 +87,7 @@ Proxy options:
 - `--listen-port PORT`: local port the proxy listens on.
 - `--connect-host HOST`: host/IP the proxy connects to.
 - `--connect-port PORT`: port the proxy connects to.
-- `--ml-kem`: use OpenSSL ML-KEM-768 instead of X25519 ECDH to establish the Update Key.
+- `--ml-kem`: use OpenSSL ML-KEM-512 instead of X25519 ECDH to establish the Update Key.
 - `--update-rekey-messages N`: establish a fresh Update Key after every `N` protected data frames observed by the master relay. `0` disables this.
 - `--session-rekey-messages M`: establish a fresh Session Key after every `M` protected data frames observed by the master relay. `0` disables this.
 
@@ -232,7 +232,7 @@ Finally, configure the real SAv5 master to connect to:
 The proxy uses this key path:
 
 ```text
-X25519 ECDH or ML-KEM-768
+X25519 ECDH or ML-KEM-512
   -> HKDF-SHA256
   -> 256-bit Update Key
   -> AES-256 Key Wrap
@@ -250,7 +250,7 @@ HKDF-SHA256
 Update Key
 ```
 
-With `--ml-kem`, Update Key establishment uses OpenSSL ML-KEM-768:
+With `--ml-kem`, Update Key establishment uses OpenSSL ML-KEM-512:
 
 ```text
 outstation ML-KEM public key

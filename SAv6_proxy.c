@@ -34,7 +34,7 @@ typedef int socket_t;
 #define MAGIC_LEN 8
 #define VERSION 1
 #define ALG_ECDH_X25519 1
-#define ALG_MLKEM768 2
+#define ALG_MLKEM512 2
 
 #define MSG_CLIENT_HELLO 1
 #define MSG_SERVER_HELLO 2
@@ -718,7 +718,7 @@ done:
 }
 
 /*
- * Master requests ML-KEM-768 from the peer, imports the returned public key,
+ * Master requests ML-KEM-512 from the peer, imports the returned public key,
  * performs encapsulation, and derives the shared update key from the secret.
  */
 static int mlkem_master_handshake(socket_t s, unsigned char update_key[UPDATE_KEY_LEN])
@@ -735,14 +735,14 @@ static int mlkem_master_handshake(socket_t s, unsigned char update_key[UPDATE_KE
     int ok = -1;
 
     log_step("ML-KEM master handshake");
-    printf("Sending CLIENT_HELLO requesting ML-KEM-768\n");
-    if (send_client_hello(s, ALG_MLKEM768, NULL, 0) < 0) goto done;
+    printf("Sending CLIENT_HELLO requesting ML-KEM-512\n");
+    if (send_client_hello(s, ALG_MLKEM512, NULL, 0) < 0) goto done;
     if (recv_msg(s, &type, &payload, &len) < 0) goto done;
     if (type != MSG_SERVER_HELLO || parse_hello(payload, len, &alg, &body, &body_len) < 0) goto done;
-    if (alg != ALG_MLKEM768) goto done;
-    log_hex("Received outstation ML-KEM-768 public key", body, body_len);
+    if (alg != ALG_MLKEM512) goto done;
+    log_hex("Received outstation ML-KEM-512 public key", body, body_len);
 
-    pctx = EVP_PKEY_CTX_new_from_name(NULL, "ML-KEM-768", NULL);
+    pctx = EVP_PKEY_CTX_new_from_name(NULL, "ML-KEM-512", NULL);
     if (!pctx || EVP_PKEY_fromdata_init(pctx) <= 0) goto done;
     params[0] = OSSL_PARAM_construct_octet_string(OSSL_PKEY_PARAM_PUB_KEY,
                                                   (void *)body, body_len);
@@ -760,7 +760,7 @@ static int mlkem_master_handshake(socket_t s, unsigned char update_key[UPDATE_KE
     log_hex("ML-KEM ciphertext sent to outstation", ciphertext, ciphertext_len);
     log_hex("ML-KEM shared secret", secret, secret_len);
     if (send_msg(s, MSG_CLIENT_HELLO, ciphertext, (uint32_t)ciphertext_len) < 0) goto done;
-    if (hkdf_sha256(secret, secret_len, "ML-KEM-768", update_key) < 0) goto done;
+    if (hkdf_sha256(secret, secret_len, "ML-KEM-512", update_key) < 0) goto done;
     log_hex("ML-KEM HKDF-derived Update Key", update_key, UPDATE_KEY_LEN);
     ok = 0;
 done:
@@ -774,7 +774,7 @@ done:
 }
 
 /*
- * Outstation generates an ML-KEM-768 key pair, sends the public key, then
+ * Outstation generates an ML-KEM-512 key pair, sends the public key, then
  * decapsulates the ciphertext received from the master to derive the shared key.
  */
 static int mlkem_outstation_handshake(socket_t s, unsigned char update_key[UPDATE_KEY_LEN])
@@ -789,7 +789,7 @@ static int mlkem_outstation_handshake(socket_t s, unsigned char update_key[UPDAT
     int ok = -1;
 
     log_step("ML-KEM outstation handshake");
-    pctx = EVP_PKEY_CTX_new_from_name(NULL, "ML-KEM-768", NULL);
+    pctx = EVP_PKEY_CTX_new_from_name(NULL, "ML-KEM-512", NULL);
     if (!pctx || EVP_PKEY_keygen_init(pctx) <= 0) goto done;
     if (EVP_PKEY_keygen(pctx, &key) <= 0) goto done;
     EVP_PKEY_CTX_free(pctx);
@@ -802,9 +802,9 @@ static int mlkem_outstation_handshake(socket_t s, unsigned char update_key[UPDAT
     if (EVP_PKEY_get_octet_string_param(key, OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY,
                                         public_key, public_key_len, &public_key_len) <= 0) goto done;
     if (public_key_len > UINT32_MAX) goto done;
-    log_hex("Outstation ML-KEM-768 public key", public_key, public_key_len);
-    printf("Sending SERVER_HELLO with ML-KEM-768 public key\n");
-    if (send_server_hello(s, ALG_MLKEM768, public_key, (uint32_t)public_key_len) < 0) goto done;
+    log_hex("Outstation ML-KEM-512 public key", public_key, public_key_len);
+    printf("Sending SERVER_HELLO with ML-KEM-512 public key\n");
+    if (send_server_hello(s, ALG_MLKEM512, public_key, (uint32_t)public_key_len) < 0) goto done;
 
     if (recv_msg(s, &type, &payload, &len) < 0) goto done;
     if (type != MSG_CLIENT_HELLO) goto done;
@@ -816,7 +816,7 @@ static int mlkem_outstation_handshake(socket_t s, unsigned char update_key[UPDAT
     if (!secret) goto done;
     if (EVP_PKEY_decapsulate(pctx, secret, &secret_len, payload, len) <= 0) goto done;
     log_hex("ML-KEM shared secret", secret, secret_len);
-    if (hkdf_sha256(secret, secret_len, "ML-KEM-768", update_key) < 0) goto done;
+    if (hkdf_sha256(secret, secret_len, "ML-KEM-512", update_key) < 0) goto done;
     log_hex("ML-KEM HKDF-derived Update Key", update_key, UPDATE_KEY_LEN);
     ok = 0;
 done:
@@ -831,7 +831,7 @@ done:
 
 /*
  * Establish or re-establish the runtime update key on the master side.
- * This either performs X25519 ECDH or ML-KEM-768 based on the current flag.
+ * This either performs X25519 ECDH or ML-KEM-512 based on the current flag.
  */
 static int establish_master_update_key(struct channel *ch)
 {
@@ -868,7 +868,7 @@ static int establish_outstation_update_key(struct channel *ch, const unsigned ch
 
     if (parse_hello(payload, len, &alg, &body, &body_len) < 0) return -1;
     /* Outstation dynamically chooses algorithm based on master's request, not local config */
-    if (alg == ALG_MLKEM768) {
+    if (alg == ALG_MLKEM512) {
         if (body_len != 0) return -1;
         rc = mlkem_outstation_handshake(ch->secure_sock, update_key);
     } else if (alg == ALG_ECDH_X25519) {
@@ -1196,7 +1196,7 @@ int main(int argc, char **argv)
         plain_sock = connected;
     }
 
-    printf("secure session established using %s; relaying traffic\n", cfg.use_ml_kem ? "ML-KEM-768" : "X25519 ECDH");
+    printf("secure session established using %s; relaying traffic\n", cfg.use_ml_kem ? "ML-KEM-512" : "X25519 ECDH");
     rc = relay(plain_sock, &ch) == 0 ? 0 : 1;
 
 done:
