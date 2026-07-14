@@ -23,6 +23,8 @@ typedef int socket_t;
 #define CLOSESOCK close
 #endif
 
+#include <math.h>
+#include <inttypes.h>
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 #include <openssl/core_names.h>
@@ -80,13 +82,190 @@ struct channel {
     uint64_t messages_since_session_key;
     uint64_t update_rekey_messages;
     uint64_t session_rekey_messages;
+    /* Packet statistics tracking */
+    uint64_t *plaintext_sizes;  /* Array of plaintext packet sizes */
+    uint64_t *encrypted_sizes;  /* Array of encrypted packet sizes */
+    uint64_t plaintext_count;   /* Number of plaintext packets received */
+    uint64_t encrypted_count;   /* Number of encrypted packets received */
+    uint64_t plaintext_capacity;/* Allocated array size for plaintext */
+    uint64_t encrypted_capacity;/* Allocated array size for encrypted */
 };
 
 /*
- * `channel` tracks the current secure session state for one side of the relay.
- * `session_key` is used for AES-256-GCM frame encryption/decryption.
- * `update_key` is used for encrypting session key updates with AES key wrap.
+ * Record packet size statistics. Allocates or expands the array as needed.
  */
+static int record_packet_size(uint64_t **sizes, uint64_t *count, uint64_t *capacity, uint64_t size)
+{
+    uint64_t new_capacity;
+    uint64_t *temp;
+
+    if (*count >= *capacity) {
+        new_capacity = (*capacity == 0) ? 256 : *capacity * 2;
+        temp = (uint64_t *)realloc(*sizes, new_capacity * sizeof(uint64_t));
+        if (!temp) return -1;
+        *sizes = temp;
+        *capacity = new_capacity;
+    }
+    (*sizes)[*count] = size;
+    (*count)++;
+    return 0;
+}
+
+/*
+ * Compare function for qsort.
+ */
+static int compare_u64(const void *a, const void *b)
+{
+    uint64_t x = *(const uint64_t *)a;
+    uint64_t y = *(const uint64_t *)b;
+    if (x < y) return -1;
+    if (x > y) return 1;
+    return 0;
+}
+
+/*
+ * Calculate statistics from a sorted array of packet sizes.
+ */
+static void calculate_stats(const uint64_t *sizes, uint64_t count,
+                            uint64_t *min_out, uint64_t *max_out,
+                            double *avg_out, double *median_out,
+                            double *p50_out, double *p95_out, double *p99_out)
+{
+    uint64_t i, total = 0;
+    uint64_t idx_50, idx_95, idx_99;
+    double mean, variance = 0, stdev;
+
+    if (count == 0) {
+        *min_out = *max_out = 0;
+        *avg_out = *median_out = *p50_out = *p95_out = *p99_out = 0;
+        return;
+    }
+
+    *min_out = sizes[0];
+    *max_out = sizes[count - 1];
+
+    for (i = 0; i < count; i++) total += sizes[i];
+    *avg_out = mean = (double)total / count;
+
+    /* Median is P50 */
+    idx_50 = count / 2;
+    *median_out = (count % 2 == 0)
+        ? ((double)sizes[idx_50 - 1] + (double)sizes[idx_50]) / 2.0
+        : (double)sizes[idx_50];
+    *p50_out = *median_out;
+
+    /* P95 and P99 percentiles */
+    idx_95 = (uint64_t)(count * 0.95);
+    if (idx_95 >= count) idx_95 = count - 1;
+    *p95_out = (double)sizes[idx_95];
+
+    idx_99 = (uint64_t)(count * 0.99);
+    if (idx_99 >= count) idx_99 = count - 1;
+    *p99_out = (double)sizes[idx_99];
+
+    /* Standard deviation */
+    for (i = 0; i < count; i++) {
+        double diff = (double)sizes[i] - mean;
+        variance += diff * diff;
+    }
+    stdev = sqrt(variance / count);
+    (void)stdev;  /* Avoid unused warning if not printed */
+}
+
+/*
+ * Print a comprehensive statistics report for relay traffic.
+ */
+static void print_stats_report(struct channel *ch)
+{
+    uint64_t *plain_sorted = NULL, *enc_sorted = NULL;
+    uint64_t min_p, max_p, min_e, max_e;
+    double avg_p, median_p, p50_p, p95_p, p99_p;
+    double avg_e, median_e, p50_e, p95_e, p99_e;
+    uint64_t total_plain = 0, total_enc = 0, i;
+
+    printf("\n\n========== Packet Statistics Report =========="
+           "\n");
+
+    if (ch->plaintext_count == 0 && ch->encrypted_count == 0) {
+        printf("No packet data collected.\n");
+        return;
+    }
+
+    /* Calculate plaintext statistics */
+    if (ch->plaintext_count > 0) {
+        plain_sorted = (uint64_t *)malloc(ch->plaintext_count * sizeof(uint64_t));
+        if (plain_sorted) {
+            memcpy(plain_sorted, ch->plaintext_sizes, ch->plaintext_count * sizeof(uint64_t));
+            qsort(plain_sorted, ch->plaintext_count, sizeof(uint64_t), compare_u64);
+            for (i = 0; i < ch->plaintext_count; i++) total_plain += plain_sorted[i];
+            calculate_stats(plain_sorted, ch->plaintext_count,
+                            &min_p, &max_p, &avg_p, &median_p, &p50_p, &p95_p, &p99_p);
+        }
+    }
+
+    /* Calculate encrypted statistics */
+    if (ch->encrypted_count > 0) {
+        enc_sorted = (uint64_t *)malloc(ch->encrypted_count * sizeof(uint64_t));
+        if (enc_sorted) {
+            memcpy(enc_sorted, ch->encrypted_sizes, ch->encrypted_count * sizeof(uint64_t));
+            qsort(enc_sorted, ch->encrypted_count, sizeof(uint64_t), compare_u64);
+            for (i = 0; i < ch->encrypted_count; i++) total_enc += enc_sorted[i];
+            calculate_stats(enc_sorted, ch->encrypted_count,
+                            &min_e, &max_e, &avg_e, &median_e, &p50_e, &p95_e, &p99_e);
+        }
+    }
+
+    printf("\nPlaintext Packets:\n");
+    printf("  Count:         %" PRIu64 "\n", ch->plaintext_count);
+    printf("  Total bytes:   %" PRIu64 "\n", total_plain);
+    if (plain_sorted) {
+        printf("  Min:           %" PRIu64 " bytes\n", min_p);
+        printf("  Max:           %" PRIu64 " bytes\n", max_p);
+        printf("  Average:       %.2f bytes\n", avg_p);
+        printf("  Median (P50):  %.2f bytes\n", median_p);
+        printf("  P95:           %.2f bytes\n", p95_p);
+        printf("  P99:           %.2f bytes\n", p99_p);
+    }
+
+    printf("\nEncrypted Packets:\n");
+    printf("  Count:         %" PRIu64 "\n", ch->encrypted_count);
+    printf("  Total bytes:   %" PRIu64 "\n", total_enc);
+    if (enc_sorted) {
+        printf("  Min:           %" PRIu64 " bytes\n", min_e);
+        printf("  Max:           %" PRIu64 " bytes\n", max_e);
+        printf("  Average:       %.2f bytes\n", avg_e);
+        printf("  Median (P50):  %.2f bytes\n", median_e);
+        printf("  P95:           %.2f bytes\n", p95_e);
+        printf("  P99:           %.2f bytes\n", p99_e);
+    }
+
+    printf("\nEncryption Overhead:\n");
+    if (total_plain > 0) {
+        printf("  Overhead ratio: %.2f%% (encrypted/plaintext)\n",
+               100.0 * (double)total_enc / (double)total_plain);
+    }
+
+    printf("\n==========================================\n\n");
+
+    free(plain_sorted);
+    free(enc_sorted);
+}
+
+/*
+ * Free allocated statistics arrays.
+ */
+static void free_stats(struct channel *ch)
+{
+    free(ch->plaintext_sizes);
+    free(ch->encrypted_sizes);
+    ch->plaintext_sizes = NULL;
+    ch->encrypted_sizes = NULL;
+    ch->plaintext_count = 0;
+    ch->encrypted_count = 0;
+    ch->plaintext_capacity = 0;
+    ch->encrypted_capacity = 0;
+}
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -1013,6 +1192,12 @@ static int relay(socket_t plain_sock, struct channel *ch)
                 done = 1;
             } else {
                 printf("\nPlaintext -> secure: received %d plaintext bytes from local endpoint\n", n);
+                /* Record plaintext packet size statistics */
+                if (record_packet_size(&ch->plaintext_sizes, &ch->plaintext_count,
+                                      &ch->plaintext_capacity, (uint64_t)n) < 0) {
+                    fprintf(stderr, "failed to record plaintext packet size\n");
+                    return -1;
+                }
                 if (maybe_master_rekey(ch) < 0) {
                     return -1;
                 }
@@ -1034,6 +1219,13 @@ static int relay(socket_t plain_sock, struct channel *ch)
                 return -1;
             } else {
                 printf("\nSecure -> plaintext: forwarding %u decrypted bytes to local endpoint\n", plain_len);
+                /* Record encrypted packet size statistics (decrypted payload size) */
+                if (record_packet_size(&ch->encrypted_sizes, &ch->encrypted_count,
+                                      &ch->encrypted_capacity, (uint64_t)plain_len) < 0) {
+                    fprintf(stderr, "failed to record encrypted packet size\n");
+                    free(plain);
+                    return -1;
+                }
                 if (send_all(plain_sock, plain, plain_len) < 0) {
                     free(plain);
                     return -1;
@@ -1209,5 +1401,7 @@ done:
     OPENSSL_cleanse(ch.update_key, sizeof(ch.update_key));
     if (provider) OSSL_PROVIDER_unload(provider);
     socket_done();
+    print_stats_report(&ch);
+    free_stats(&ch);
     return rc;
 }
