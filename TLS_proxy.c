@@ -249,7 +249,7 @@ static void print_ssl_error(const char *what)
     }
 }
 
-static void print_name(const char *label, X509_NAME *name)
+static void print_name(const char *label, const X509_NAME *name)
 {
     if (!name) {
         printf("%s: <null>\n", label);
@@ -515,6 +515,18 @@ static int relay_loop(struct channel *ch, int timeout_ms, const struct config *c
     uint64_t tls_sslwrite_calls = 0;
     uint64_t tls_sslread_calls = 0;
 
+    /* “messages received” counters + statistics over receive-chunk sizes */
+    uint64_t plain_recv_msgs = 0; /* recv() chunks with n > 0 from plaintext side */
+    uint64_t tls_recv_msgs = 0;   /* SSL_read() chunks with r > 0 from TLS side */
+
+    uint64_t plain_recv_bytes_total = 0;
+    uint64_t tls_recv_bytes_total = 0;
+
+    uint64_t plain_recv_bytes_min = 0;
+    uint64_t plain_recv_bytes_max = 0;
+    uint64_t tls_recv_bytes_min = 0;
+    uint64_t tls_recv_bytes_max = 0;
+
     uint64_t plain_to_tls_bytes = 0;   /* plaintext recv bytes fed into SSL_write */
     uint64_t tls_out_bytes = 0;        /* SSL_write bytes written */
     uint64_t tls_in_bytes = 0;         /* SSL_read returned bytes */
@@ -554,6 +566,16 @@ static int relay_loop(struct channel *ch, int timeout_ms, const struct config *c
             if (n <= 0) {
                 plain_open = 0;
                 break;
+            }
+
+            plain_recv_msgs++;
+            plain_recv_bytes_total += (uint64_t)n;
+            if (plain_recv_msgs == 1) {
+                plain_recv_bytes_min = (uint64_t)n;
+                plain_recv_bytes_max = (uint64_t)n;
+            } else {
+                if ((uint64_t)n < plain_recv_bytes_min) plain_recv_bytes_min = (uint64_t)n;
+                if ((uint64_t)n > plain_recv_bytes_max) plain_recv_bytes_max = (uint64_t)n;
             }
 
             plain_to_tls_bytes += (uint64_t)n;
@@ -597,7 +619,18 @@ static int relay_loop(struct channel *ch, int timeout_ms, const struct config *c
                 return -1;
             }
 
+            tls_recv_msgs++;
+            tls_recv_bytes_total += (uint64_t)r;
+            if (tls_recv_msgs == 1) {
+                tls_recv_bytes_min = (uint64_t)r;
+                tls_recv_bytes_max = (uint64_t)r;
+            } else {
+                if ((uint64_t)r < tls_recv_bytes_min) tls_recv_bytes_min = (uint64_t)r;
+                if ((uint64_t)r > tls_recv_bytes_max) tls_recv_bytes_max = (uint64_t)r;
+            }
+
             tls_in_bytes += (uint64_t)r;
+
 
             int off = 0;
             while (off < r) {
@@ -615,24 +648,57 @@ static int relay_loop(struct channel *ch, int timeout_ms, const struct config *c
         }
     }
 
+    double avg_plain_recv = plain_recv_calls
+                                ? (double)plain_to_tls_bytes / plain_recv_calls
+                                : 0.0;
+
+    double avg_plain_send = plain_send_calls
+                                ? (double)tls_to_plain_bytes / plain_send_calls
+                                : 0.0;
+
+    double avg_ssl_write = tls_sslwrite_calls
+                               ? (double)tls_out_bytes / tls_sslwrite_calls
+                               : 0.0;
+
+    double avg_ssl_read = tls_sslread_calls
+                              ? (double)tls_in_bytes / tls_sslread_calls
+                              : 0.0;
+
     printf("\n========== Relay Byte Summary =========="
-           "\nplain recv() calls: %llu\n"
-           "plain send() calls: %llu\n"
-           "SSL_write() calls: %llu\n"
-           "SSL_read() calls:  %llu\n"
-           "\nplain_to_tls_bytes (recv): %llu\n"
-           "tls_out_bytes (SSL_write wrote): %llu\n"
-           "tls_in_bytes (SSL_read returned): %llu\n"
-           "tls_to_plain_bytes (send): %llu\n"
-           "========================================\n",
+           "\nplain recv() calls: %llu"
+           "\nplain send() calls: %llu"
+           "\nSSL_write() calls: %llu"
+           "\nSSL_read() calls:  %llu"
+
+           "\n\nplain_to_tls_bytes (recv): %llu"
+           "\n  Average bytes/recv():      %.2f"
+
+           "\n\ntls_out_bytes (SSL_write): %llu"
+           "\n  Average bytes/SSL_write(): %.2f"
+
+           "\n\ntls_in_bytes (SSL_read): %llu"
+           "\n  Average bytes/SSL_read():  %.2f"
+
+           "\n\ntls_to_plain_bytes (send): %llu"
+           "\n  Average bytes/send():      %.2f"
+
+           "\n========================================\n",
            (unsigned long long)plain_recv_calls,
            (unsigned long long)plain_send_calls,
            (unsigned long long)tls_sslwrite_calls,
            (unsigned long long)tls_sslread_calls,
+
            (unsigned long long)plain_to_tls_bytes,
+           avg_plain_recv,
+
            (unsigned long long)tls_out_bytes,
+           avg_ssl_write,
+
            (unsigned long long)tls_in_bytes,
-           (unsigned long long)tls_to_plain_bytes);
+           avg_ssl_read,
+
+           (unsigned long long)tls_to_plain_bytes,
+           avg_plain_send);
 
     return 0;
 }
