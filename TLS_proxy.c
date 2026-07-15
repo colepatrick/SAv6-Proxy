@@ -25,15 +25,12 @@ typedef int socket_t;
 #define CLOSESOCK close
 #endif
 
-
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/x509.h>
 #include <openssl/pem.h>
-
 #include <openssl/evp.h>
 #include <openssl/bn.h>
-
 
 #define BUF_SIZE 65536
 
@@ -50,14 +47,16 @@ struct config {
     const char *key_path;
     const char *ca_path;
 
-    int insecure; /* if non-zero, skip peer/host verification */
+    int insecure;    /* if non-zero, skip peer/host verification */
     int verify_peer; /* if non-zero, verify peer cert (uses ca_path if provided) */
 
     int auto_cert; /* if non-zero, generate ephemeral server cert/key when --cert/--key missing (outstation mode) */
 
     int timeout_ms; /* for handshake and I/O select timeouts */
-};
 
+    int verbose;   /* print detailed connection/TLS information */
+    int log_keys;  /* dump sensitive key/symmetric material (debug only) */
+};
 
 struct channel {
     socket_t plain_sock;
@@ -73,8 +72,8 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
         "Usage:\n"
-        "  %s --mode master   [--listen-host HOST] --listen-port PLAIN_PORT --connect-host PROXY_HOST --connect-port PROXY_PORT [--ca PATH] [--cert PATH --key PATH] [--insecure] [--timeout-ms MS]\n"
-        "  %s --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT --cert PATH --key PATH [--ca PATH] [--insecure] [--timeout-ms MS]\n\n"
+        "  %s --mode master   [--listen-host HOST] --listen-port PLAIN_PORT --connect-host PROXY_HOST --connect-port PROXY_PORT [--ca PATH] [--cert PATH --key PATH] [--insecure] [--timeout-ms MS] [--verbose] [--log-keys]\n"
+        "  %s --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT --cert PATH --key PATH [--ca PATH] [--insecure] [--timeout-ms MS] [--verbose] [--log-keys]\n\n"
         "This proxy replaces the SAV6 custom secure channel with standard TLS.\n"
         "Stations on each side see only raw plaintext bytes relayed through TLS.\n\n"
         "Common options:\n"
@@ -84,7 +83,9 @@ static void usage(const char *prog)
         "  --connect-port PORT connect target port\n"
         "  --insecure           do not verify peer certificate (default for convenience)\n"
         "  --ca PATH            CA bundle to use when verifying (only if verification enabled)\n"
-        "  --timeout-ms MS      optional timeout used for TLS handshake and relay loop; default 0 (blocking)\n",
+        "  --timeout-ms MS      optional timeout used for TLS handshake and relay loop; default 0 (blocking)\n"
+        "  --verbose            print detailed TLS/cert/session information and per-read/write sizes\n"
+        "  --log-keys           ALSO dump sensitive key/symmetric material (includes TLS randoms; not safe for production)\n",
         prog, prog);
 }
 
@@ -106,7 +107,6 @@ static void socket_done(void)
 }
 
 static socket_t connect_tcp(const char *host, const char *port)
-
 {
     struct addrinfo hints;
     struct addrinfo *res = NULL, *rp;
@@ -172,9 +172,10 @@ static int parse_args(int argc, char **argv, struct config *cfg)
     cfg->insecure = 1; /* default to insecure for convenience */
     cfg->auto_cert = 1; /* auto-generate outstation cert/key by default */
     cfg->timeout_ms = 0;
+    cfg->verbose = 0;
+    cfg->log_keys = 0;
 
     for (i = 1; i < argc; i++) {
-
         if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
             i++;
             if (strcmp(argv[i], "master") == 0) cfg->is_master = 1;
@@ -197,13 +198,17 @@ static int parse_args(int argc, char **argv, struct config *cfg)
         } else if (strcmp(argv[i], "--insecure") == 0) {
             cfg->insecure = 1;
         } else if (strcmp(argv[i], "--timeout-ms") == 0 && i + 1 < argc) {
-
             long v;
             if (parse_long(argv[++i], &v) < 0 || v < 0 || v > INT_MAX) return -1;
             cfg->timeout_ms = (int)v;
         } else if (strcmp(argv[i], "--verify-peer") == 0) {
             cfg->verify_peer = 1;
             cfg->insecure = 0;
+        } else if (strcmp(argv[i], "--verbose") == 0) {
+            cfg->verbose = 1;
+        } else if (strcmp(argv[i], "--log-keys") == 0) {
+            cfg->log_keys = 1;
+            cfg->verbose = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
             return -1;
         } else {
@@ -221,7 +226,6 @@ static int parse_args(int argc, char **argv, struct config *cfg)
 
     return 0;
 }
-
 
 static void openssl_init(void)
 {
@@ -245,6 +249,46 @@ static void print_ssl_error(const char *what)
     }
 }
 
+static void print_name(const char *label, X509_NAME *name)
+{
+    if (!name) {
+        printf("%s: <null>\n", label);
+        return;
+    }
+    char *s = X509_NAME_oneline(name, NULL, 0);
+    if (s) {
+        printf("%s: %s\n", label, s);
+        OPENSSL_free(s);
+    } else {
+        printf("%s: <oneline-failed>\n", label);
+    }
+}
+
+static void print_cert_details(const char *label, X509 *cert)
+{
+    if (!cert) {
+        printf("%s: <none>\n", label);
+        return;
+    }
+
+    printf("%s\n", label);
+    print_name("  subject", X509_get_subject_name(cert));
+    print_name("  issuer", X509_get_issuer_name(cert));
+
+    ASN1_INTEGER *serial = X509_get_serialNumber(cert);
+    if (serial) {
+        BIGNUM *bn = ASN1_INTEGER_to_BN(serial, NULL);
+        if (bn) {
+            char *hex = BN_bn2hex(bn);
+            if (hex) {
+                printf("  serial(hex): %s\n", hex);
+                OPENSSL_free(hex);
+            }
+            BN_free(bn);
+        }
+    }
+}
+
 static int tls_configure_ctx_as_client(SSL_CTX *ctx, const struct config *cfg)
 {
     if (!cfg->insecure || cfg->verify_peer) {
@@ -262,9 +306,7 @@ static int tls_configure_ctx_as_client(SSL_CTX *ctx, const struct config *cfg)
 
 static int generate_self_signed_cert(SSL_CTX *ctx)
 {
-    /* Ephemeral self-signed cert for lab/testing.
-     * Works best with --insecure (default) or when peer verification is disabled.
-     */
+    /* Ephemeral self-signed cert for lab/testing. */
     int rc = -1;
     EVP_PKEY *pkey = NULL;
     EVP_PKEY_CTX *pctx = NULL;
@@ -273,13 +315,11 @@ static int generate_self_signed_cert(SSL_CTX *ctx)
     pkey = EVP_PKEY_new();
     if (!pkey) goto done;
 
-    /* Generate an RSA key using the non-deprecated EVP_PKEY API (OpenSSL 3+). */
     pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
     if (!pctx) goto done;
     if (EVP_PKEY_keygen_init(pctx) <= 0) goto done;
     if (EVP_PKEY_CTX_set_rsa_keygen_bits(pctx, 2048) <= 0) goto done;
 
-    /* Public exponent e = 65537 (RSA_F4). */
     {
         BIGNUM *e_bn = NULL;
         e_bn = BN_new();
@@ -292,10 +332,8 @@ static int generate_self_signed_cert(SSL_CTX *ctx)
             BN_free(e_bn);
             goto done;
         }
-        /* EVP_PKEY_CTX_set1_rsa_keygen_pubexp() copies the BIGNUM; free ours. */
         BN_free(e_bn);
     }
-
 
     if (EVP_PKEY_keygen(pctx, &pkey) <= 0) goto done;
 
@@ -303,51 +341,33 @@ static int generate_self_signed_cert(SSL_CTX *ctx)
     if (!x509) goto done;
 
     ASN1_INTEGER_set(X509_get_serialNumber(x509), 1);
-
     X509_gmtime_adj(X509_get_notBefore(x509), 0);
-    X509_gmtime_adj(X509_get_notAfter(x509), 60L * 60L); /* 1 hour */
-
+    X509_gmtime_adj(X509_get_notAfter(x509), 60L * 60L);
     X509_set_version(x509, 2);
-
     X509_set_pubkey(x509, pkey);
 
-    /* Subject/Issuer: C=US, O=TLS-Mesh Proxy, CN=localhost */
-    /* X509_get_subject_name() may return a const pointer depending on OpenSSL version. */
     X509_NAME *name = (X509_NAME *)X509_get_subject_name(x509);
     if (!name) goto done;
-    X509_NAME_add_entry_by_txt(name, "C",  MBSTRING_ASC,
-                               (unsigned char *)"US", -1, -1, 0);
-    X509_NAME_add_entry_by_txt(name, "O",  MBSTRING_ASC,
-                               (unsigned char *)"TLS-Mesh Proxy", -1, -1, 0);
-    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
-                               (unsigned char *)"localhost", -1, -1, 0);
+    X509_NAME_add_entry_by_txt(name, "C", MBSTRING_ASC, (unsigned char *)"US", -1, -1, 0);
+    X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC, (unsigned char *)"TLS-Mesh Proxy", -1, -1, 0);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (unsigned char *)"localhost", -1, -1, 0);
 
     if (!X509_set_issuer_name(x509, name)) goto done;
-
     if (!X509_sign(x509, pkey, EVP_sha256())) goto done;
 
     if (SSL_CTX_use_certificate(ctx, x509) != 1) goto done;
-
-    /* SSL_CTX_use_PrivateKey increments ownership expectations; we keep pkey.
-     * It takes ownership of a reference internally; still keep pkey until end.
-     */
     if (SSL_CTX_use_PrivateKey(ctx, pkey) != 1) goto done;
-
     if (!SSL_CTX_check_private_key(ctx)) goto done;
 
     rc = 0;
 
 done:
-    if (rc != 0) {
-        print_ssl_error("generate_self_signed_cert");
-    }
-    /* ctx now has cert/key references; free ours safely */
+    if (rc != 0) print_ssl_error("generate_self_signed_cert");
     if (x509) X509_free(x509);
     if (pctx) EVP_PKEY_CTX_free(pctx);
     if (pkey) EVP_PKEY_free(pkey);
     return rc;
 }
-
 
 static int tls_configure_ctx_as_server(SSL_CTX *ctx, const struct config *cfg)
 {
@@ -375,16 +395,89 @@ static int tls_configure_ctx_as_server(SSL_CTX *ctx, const struct config *cfg)
     return 0;
 }
 
+static void print_tls_details(SSL *ssl, const struct config *cfg)
+{
+    if (!ssl || !cfg) return;
+    if (!cfg->verbose && !cfg->log_keys) return;
+
+    printf("\n=== TLS Details (%s) ===\n", cfg->is_master ? "master" : "outstation");
+    printf("TLS version: %s\n", SSL_get_version(ssl) ? SSL_get_version(ssl) : "<unknown>");
+    printf("Cipher suite: %s\n", SSL_get_cipher(ssl) ? SSL_get_cipher(ssl) : "<unknown>");
+    printf("Verify result: %ld\n", SSL_get_verify_result(ssl));
+
+    X509 *peer = SSL_get_peer_certificate(ssl);
+    if (peer) {
+        print_cert_details("Peer certificate", peer);
+        if (cfg->log_keys) {
+            BIO *b = BIO_new(BIO_s_mem());
+            if (b) {
+                PEM_write_bio_X509(b, peer);
+                BUF_MEM *ptr = NULL;
+                BIO_get_mem_ptr(b, &ptr);
+                if (ptr && ptr->data && ptr->length > 0) {
+                    printf("Peer certificate PEM (%ld bytes):\n%.*s\n",
+                           (long)ptr->length, (int)ptr->length, ptr->data);
+                }
+                BIO_free(b);
+            }
+        }
+        X509_free(peer);
+    } else {
+        printf("Peer certificate: <none>\n");
+    }
+
+    X509 *local = SSL_get_certificate(ssl);
+    if (local) {
+        print_cert_details("Local certificate", local);
+        if (cfg->log_keys) {
+            BIO *b = BIO_new(BIO_s_mem());
+            if (b) {
+                PEM_write_bio_X509(b, local);
+                BUF_MEM *ptr = NULL;
+                BIO_get_mem_ptr(b, &ptr);
+                if (ptr && ptr->data && ptr->length > 0) {
+                    printf("Local certificate PEM (%ld bytes):\n%.*s\n",
+                           (long)ptr->length, (int)ptr->length, ptr->data);
+                }
+                BIO_free(b);
+            }
+        }
+        X509_free(local);
+    }
+
+    SSL_SESSION *sess = SSL_get_session(ssl);
+    if (sess) {
+        printf("Session reusable: %d\n", SSL_SESSION_is_resumable(sess));
+    } else {
+        printf("Session: <none>\n");
+    }
+
+    if (cfg->log_keys) {
+        printf("log_keys enabled: TLS randoms (sensitive)\n");
+        unsigned char cr[SSL3_RANDOM_SIZE];
+        unsigned char sr[SSL3_RANDOM_SIZE];
+        if (SSL_get_client_random(ssl, cr, sizeof(cr)) == 1) {
+            printf("Client random (hex): ");
+            for (size_t i = 0; i < sizeof(cr); i++) printf("%02X", cr[i]);
+            printf("\n");
+        }
+        if (SSL_get_server_random(ssl, sr, sizeof(sr)) == 1) {
+            printf("Server random (hex): ");
+            for (size_t i = 0; i < sizeof(sr); i++) printf("%02X", sr[i]);
+            printf("\n");
+        }
+    }
+
+    printf("=== End TLS Details ===\n\n");
+}
 
 static int tls_handshake(SSL *ssl, struct config *cfg)
 {
-    /* Blocking handshake; optional coarse timeout using socket-level timeouts. */
     if (cfg->timeout_ms > 0) {
         struct timeval tv;
         tv.tv_sec = cfg->timeout_ms / 1000;
         tv.tv_usec = (cfg->timeout_ms % 1000) * 1000;
 #ifdef _WIN32
-        /* setsockopt requires SO_RCVTIMEO/SO_SNDTIMEO */
         socket_t fd = SSL_get_fd(ssl);
         setsockopt((SOCKET)fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
         setsockopt((SOCKET)fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof(tv));
@@ -398,6 +491,7 @@ static int tls_handshake(SSL *ssl, struct config *cfg)
     int rc;
     if (cfg->is_master) rc = SSL_connect(ssl);
     else rc = SSL_accept(ssl);
+
     if (rc != 1) {
         print_ssl_error(cfg->is_master ? "SSL_connect" : "SSL_accept");
         return -1;
@@ -405,10 +499,26 @@ static int tls_handshake(SSL *ssl, struct config *cfg)
     return 0;
 }
 
-static int relay_loop(struct channel *ch, int timeout_ms)
+static void log_bytes(const char *label, int n)
+{
+    if (n < 0) printf("%s: <error>\n", label);
+    else printf("%s: %d bytes\n", label, n);
+}
+
+static int relay_loop(struct channel *ch, int timeout_ms, const struct config *cfg)
 {
     unsigned char plain_buf[BUF_SIZE];
     unsigned char tls_buf[BUF_SIZE];
+
+    uint64_t plain_recv_calls = 0;
+    uint64_t plain_send_calls = 0;
+    uint64_t tls_sslwrite_calls = 0;
+    uint64_t tls_sslread_calls = 0;
+
+    uint64_t plain_to_tls_bytes = 0;   /* plaintext recv bytes fed into SSL_write */
+    uint64_t tls_out_bytes = 0;        /* SSL_write bytes written */
+    uint64_t tls_in_bytes = 0;         /* SSL_read returned bytes */
+    uint64_t tls_to_plain_bytes = 0;  /* plain send bytes */
 
     int plain_open = 1;
     int tls_open = 1;
@@ -437,42 +547,92 @@ static int relay_loop(struct channel *ch, int timeout_ms)
 
         if (FD_ISSET(ch->plain_sock, &rfds)) {
             int n = (int)recv(ch->plain_sock, (char *)plain_buf, sizeof(plain_buf), 0);
+            plain_recv_calls++;
+            if (cfg->verbose) {
+                printf("\n[relay] plaintext recv() -> %d bytes\n", n);
+            }
             if (n <= 0) {
                 plain_open = 0;
                 break;
             }
 
+            plain_to_tls_bytes += (uint64_t)n;
+
             int off = 0;
             while (off < n) {
+                tls_sslwrite_calls++;
                 int w = SSL_write(ch->ssl, plain_buf + off, (int)(n - off));
                 if (w <= 0) {
                     int err = SSL_get_error(ch->ssl, w);
-                    (void)err;
+                    if (cfg->verbose) {
+                        printf("[relay] SSL_write error: w=%d SSL_get_error=%d\n", w, err);
+                    }
                     return -1;
                 }
+
+                if (cfg->verbose) {
+                    printf("[relay] SSL_write() <- %d plaintext bytes, wrote %d bytes\n", (int)(n - off), w);
+                }
+
+                tls_out_bytes += (uint64_t)w;
                 off += w;
             }
         }
 
         if (FD_ISSET(ch->tcp_secure_sock, &rfds)) {
             int r = SSL_read(ch->ssl, tls_buf, sizeof(tls_buf));
+            tls_sslread_calls++;
+            if (cfg->verbose) {
+                printf("\n[relay] SSL_read() -> %d bytes\n", r);
+            }
             if (r <= 0) {
                 int err = SSL_get_error(ch->ssl, r);
                 if (err == SSL_ERROR_ZERO_RETURN) {
                     tls_open = 0;
                     break;
                 }
+                if (cfg->verbose) {
+                    printf("[relay] SSL_read error: r=%d SSL_get_error=%d\n", r, err);
+                }
                 return -1;
             }
 
+            tls_in_bytes += (uint64_t)r;
+
             int off = 0;
             while (off < r) {
+                plain_send_calls++;
                 int w = (int)send(ch->plain_sock, (const char *)tls_buf + off, r - off, 0);
                 if (w <= 0) return -1;
+
+                if (cfg->verbose) {
+                    printf("[relay] send() -> %d bytes\n", w);
+                }
+
+                tls_to_plain_bytes += (uint64_t)w;
                 off += w;
             }
         }
     }
+
+    printf("\n========== Relay Byte Summary =========="
+           "\nplain recv() calls: %llu\n"
+           "plain send() calls: %llu\n"
+           "SSL_write() calls: %llu\n"
+           "SSL_read() calls:  %llu\n"
+           "\nplain_to_tls_bytes (recv): %llu\n"
+           "tls_out_bytes (SSL_write wrote): %llu\n"
+           "tls_in_bytes (SSL_read returned): %llu\n"
+           "tls_to_plain_bytes (send): %llu\n"
+           "========================================\n",
+           (unsigned long long)plain_recv_calls,
+           (unsigned long long)plain_send_calls,
+           (unsigned long long)tls_sslwrite_calls,
+           (unsigned long long)tls_sslread_calls,
+           (unsigned long long)plain_to_tls_bytes,
+           (unsigned long long)tls_out_bytes,
+           (unsigned long long)tls_in_bytes,
+           (unsigned long long)tls_to_plain_bytes);
 
     return 0;
 }
@@ -502,7 +662,6 @@ int main(int argc, char **argv)
     ch.is_master = cfg.is_master;
 
     if (cfg.is_master) {
-        /* master: plaintext station -> this proxy -> TLS client -> outstation proxy */
         listener = listen_tcp(cfg.listen_host, cfg.listen_port);
         if (listener == INVALID_SOCKET) {
             fprintf(stderr, "failed to listen on %s:%s\n",
@@ -511,6 +670,7 @@ int main(int argc, char **argv)
         }
         printf("TLS-mesh master: waiting for plaintext station on %s:%s\n",
                cfg.listen_host ? cfg.listen_host : "*", cfg.listen_port);
+
         accepted = accept(listener, NULL, NULL);
         if (accepted == INVALID_SOCKET) {
             fprintf(stderr, "accept failed\n");
@@ -542,16 +702,18 @@ int main(int argc, char **argv)
             print_ssl_error("SSL_new");
             goto done;
         }
-        SSL_set_fd(ch.ssl, (int)ch.tcp_secure_sock);
 
+        SSL_set_fd(ch.ssl, (int)ch.tcp_secure_sock);
         printf("TLS-mesh master: performing TLS handshake to %s:%s\n", cfg.connect_host, cfg.connect_port);
+
         if (tls_handshake(ch.ssl, &cfg) < 0) goto done;
 
         printf("TLS-mesh master: TLS handshake complete; relaying plaintext bytes\n");
-        if (relay_loop(&ch, cfg.timeout_ms) < 0) goto done;
+        print_tls_details(ch.ssl, &cfg);
+
+        if (relay_loop(&ch, cfg.timeout_ms, &cfg) < 0) goto done;
 
     } else {
-        /* outstation: TLS server -> this proxy -> plaintext station */
         listener = listen_tcp(cfg.listen_host, cfg.listen_port);
         if (listener == INVALID_SOCKET) {
             fprintf(stderr, "failed to listen on %s:%s\n",
@@ -560,6 +722,7 @@ int main(int argc, char **argv)
         }
         printf("TLS-mesh outstation: waiting for TLS client on %s:%s\n",
                cfg.listen_host ? cfg.listen_host : "*", cfg.listen_port);
+
         accepted = accept(listener, NULL, NULL);
         if (accepted == INVALID_SOCKET) {
             fprintf(stderr, "accept failed\n");
@@ -567,7 +730,6 @@ int main(int argc, char **argv)
         }
         ch.tcp_secure_sock = accepted;
 
-        /* Connect to the local plaintext outstation endpoint once TLS is up */
         plain_sock = connect_tcp(cfg.connect_host, cfg.connect_port);
         if (plain_sock == INVALID_SOCKET) {
             fprintf(stderr, "failed to connect local plaintext station at %s:%s\n", cfg.connect_host, cfg.connect_port);
@@ -591,16 +753,16 @@ int main(int argc, char **argv)
             print_ssl_error("SSL_new");
             goto done;
         }
-        SSL_set_fd(ch.ssl, (int)ch.tcp_secure_sock);
 
+        SSL_set_fd(ch.ssl, (int)ch.tcp_secure_sock);
         printf("TLS-mesh outstation: performing TLS handshake\n");
         if (tls_handshake(ch.ssl, &cfg) < 0) goto done;
 
         printf("TLS-mesh outstation: TLS handshake complete; relaying plaintext bytes\n");
-        if (relay_loop(&ch, cfg.timeout_ms) < 0) goto done;
-    }
+        print_tls_details(ch.ssl, &cfg);
 
-    /* success */
+        if (relay_loop(&ch, cfg.timeout_ms, &cfg) < 0) goto done;
+    }
 
 done:
     if (ch.ssl) {
@@ -614,13 +776,8 @@ done:
     if (accepted != INVALID_SOCKET && accepted != plain_sock && accepted != connected) CLOSESOCK(accepted);
     if (listener != INVALID_SOCKET) CLOSESOCK(listener);
 
-    if (cfg.insecure == 0 && ch.ssl) {
-        /* no-op */
-    }
-
     openssl_cleanup();
     socket_done();
 
     return 0;
 }
-

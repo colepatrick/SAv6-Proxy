@@ -74,16 +74,16 @@ ML-KEM mode requires OpenSSL 3.5 or newer with ML-KEM support. X25519 ECDH mode 
 
 The TLS variant replaces the SAV6-style secure proxy-to-proxy leg with standard TLS and relays raw plaintext bytes between stations.
 
-Executable: `SAv6_proxy_tls(.exe)`
+Executable: `TLS_proxy(.exe)`
 
 General usage:
 
 ```sh
-# master-side: plaintext station -> SAv6_proxy_tls -> TLS -> outstation proxy
-./SAv6_proxy_tls --mode master   [--listen-host HOST] --listen-port PLAIN_PORT --connect-host TLS_PROXY_HOST --connect-port TLS_PROXY_PORT [--insecure] [--timeout-ms MS]
+# master-side: plaintext station -> TLS_proxy -> TLS -> outstation proxy
+./TLS_proxy --mode master   [--listen-host HOST] --listen-port PLAIN_PORT --connect-host TLS_PROXY_HOST --connect-port TLS_PROXY_PORT [--insecure] [--timeout-ms MS]
 
-# outstation-side: TLS server -> SAv6_proxy_tls -> plaintext station
-./SAv6_proxy_tls --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT [--cert SERVER_CERT.pem --key SERVER_KEY.pem] [--insecure] [--timeout-ms MS]
+# outstation-side: TLS server -> TLS_proxy -> plaintext station
+./TLS_proxy --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT [--cert SERVER_CERT.pem --key SERVER_KEY.pem] [--insecure] [--timeout-ms MS]
 
 
 ```
@@ -113,14 +113,14 @@ Example ports:
 2) Start TLS outstation proxy (TLS server):
 
 ```sh
-./SAv6_proxy_tls --mode outstation --listen-host 127.0.0.1 --listen-port 20000 --connect-host 127.0.0.1 --connect-port 20001
+./TLS_proxy --mode outstation --listen-host 127.0.0.1 --listen-port 20000 --connect-host 127.0.0.1 --connect-port 20001 --verbose --log-keys
 
 ```
 
 3) Start TLS master proxy (TLS client):
 
 ```sh
-./SAv6_proxy_tls --mode master --listen-host 127.0.0.1 --listen-port 19999 --connect-host 127.0.0.1 --connect-port 20000
+./TLS_proxy --mode master --listen-host 127.0.0.1 --listen-port 19999 --connect-host 127.0.0.1 --connect-port 20000 --verbose --log-keys
 ```
 
 4) Start plaintext dummy master:
