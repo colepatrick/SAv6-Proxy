@@ -1,7 +1,0 @@
-Overwrite plan pending approval.
-
-Will replace SAv6_proxy_tls.c with a complete implementation that:
-- adds --verbose and --log-keys handling in usage/parse_args
-- prints TLS negotiated parameters and cert details after handshake
-- instruments relay loop to log recv/send/SSL_write/SSL_read sizes and totals
-
