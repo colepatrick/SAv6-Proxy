@@ -2,6 +2,7 @@ ifeq ($(origin CC),default)
 CC = gcc
 endif
 PROXY_SRC ?= SAv6_proxy.c
+PROXY_TLS_SRC ?= SAv6_proxy_tls.c
 STATION_SRC ?= dummy_station.c
 
 CFLAGS ?= -Wall -Wextra
@@ -30,6 +31,7 @@ SOCKET_LDLIBS ?=
 endif
 
 PROXY_TARGET ?= SAv6_proxy$(EXEEXT)
+PROXY_TLS_TARGET ?= SAv6_proxy_tls$(EXEEXT)
 STATION_TARGET ?= dummy_station$(EXEEXT)
 
 PROXY_CPPFLAGS = $(OPENSSL_CPPFLAGS)
@@ -37,15 +39,21 @@ PROXY_LDFLAGS = $(OPENSSL_LDFLAGS)
 PROXY_LDLIBS = $(OPENSSL_LDLIBS) $(SOCKET_LDLIBS)
 STATION_LDLIBS = $(SOCKET_LDLIBS)
 
-.PHONY: all clean help proxy station run-help run-station-help
+.PHONY: all clean help proxy proxy-tls station run-help run-station-help
 
-all: proxy station
+all: proxy proxy-tls station
+
 
 proxy: $(PROXY_TARGET)
+
+proxy-tls: $(PROXY_TLS_TARGET)
 
 station: $(STATION_TARGET)
 
 $(PROXY_TARGET): $(PROXY_SRC)
+	$(CC) $(CFLAGS) $(PROXY_CPPFLAGS) $< $(PROXY_LDFLAGS) $(PROXY_LDLIBS) -o $@
+
+$(PROXY_TLS_TARGET): $(PROXY_TLS_SRC)
 	$(CC) $(CFLAGS) $(PROXY_CPPFLAGS) $< $(PROXY_LDFLAGS) $(PROXY_LDLIBS) -o $@
 
 $(STATION_TARGET): $(STATION_SRC)
@@ -69,4 +77,5 @@ help:
 
 clean:
 	-$(RM) "$(PROXY_TARGET)"
+	-$(RM) "$(PROXY_TLS_TARGET)"
 	-$(RM) "$(STATION_TARGET)"

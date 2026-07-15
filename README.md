@@ -70,7 +70,72 @@ ML-KEM mode requires OpenSSL 3.5 or newer with ML-KEM support. X25519 ECDH mode 
 
 ### SAv6 Proxy
 
+### TLS Proxy (TLS-protected tunnel)
+
+The TLS variant replaces the SAV6-style secure proxy-to-proxy leg with standard TLS and relays raw plaintext bytes between stations.
+
+Executable: `SAv6_proxy_tls(.exe)`
+
 General usage:
+
+```sh
+# master-side: plaintext station -> SAv6_proxy_tls -> TLS -> outstation proxy
+./SAv6_proxy_tls --mode master   [--listen-host HOST] --listen-port PLAIN_PORT --connect-host TLS_PROXY_HOST --connect-port TLS_PROXY_PORT [--insecure] [--timeout-ms MS]
+
+# outstation-side: TLS server -> SAv6_proxy_tls -> plaintext station
+./SAv6_proxy_tls --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT [--cert SERVER_CERT.pem --key SERVER_KEY.pem] [--insecure] [--timeout-ms MS]
+
+
+```
+
+Proxy-to-proxy security options:
+
+- `--insecure`: skip certificate verification (default for easy local testing)
+- `--ca PATH`: CA bundle to use when verification is enabled
+- `--timeout-ms MS`: optional coarse timeout for the TLS handshake and relay loop
+
+### TLS local test flow (with dummy_station)
+
+Example ports:
+
+```text
+19999 = master plaintext input (dummy master -> TLS master proxy)
+20000 = TLS tunnel input (TLS outstation proxy listens)
+20001 = outstation plaintext input (TLS outstation proxy -> dummy outstation)
+```
+
+1) Start plaintext outstation:
+
+```sh
+./dummy_station --role outstation --listen-host 127.0.0.1 --listen-port 20001
+```
+
+2) Start TLS outstation proxy (TLS server):
+
+```sh
+./SAv6_proxy_tls --mode outstation --listen-host 127.0.0.1 --listen-port 20000 --connect-host 127.0.0.1 --connect-port 20001
+
+```
+
+3) Start TLS master proxy (TLS client):
+
+```sh
+./SAv6_proxy_tls --mode master --listen-host 127.0.0.1 --listen-port 19999 --connect-host 127.0.0.1 --connect-port 20000
+```
+
+4) Start plaintext dummy master:
+
+```sh
+./dummy_station --role master --connect-host 127.0.0.1 --connect-port 19999 --count 5
+```
+
+Stations themselves only see raw plaintext bytes; they do not need to know about TLS.
+
+
+General usage:
+
+
+
 
 ```sh
 ./SAv6_proxy --mode master [--listen-host HOST] --listen-port PLAIN_PORT --connect-host PROXY_HOST --connect-port PROXY_PORT [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]
