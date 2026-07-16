@@ -80,10 +80,10 @@ General usage:
 
 ```sh
 # master-side: plaintext station -> TLS_proxy -> TLS -> outstation proxy
-./TLS_proxy --mode master   [--listen-host HOST] --listen-port PLAIN_PORT --connect-host TLS_PROXY_HOST --connect-port TLS_PROXY_PORT [--insecure] [--timeout-ms MS]
+./TLS_proxy --mode master   [--listen-host HOST] --listen-port PLAIN_PORT --connect-host TLS_PROXY_HOST --connect-port TLS_PROXY_PORT [--insecure] [--timeout-ms MS] [--ml-kem-512]
 
 # outstation-side: TLS server -> TLS_proxy -> plaintext station
-./TLS_proxy --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT [--cert SERVER_CERT.pem --key SERVER_KEY.pem] [--insecure] [--timeout-ms MS]
+./TLS_proxy --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT [--cert SERVER_CERT.pem --key SERVER_KEY.pem] [--insecure] [--timeout-ms MS] [--ml-kem-512]
 
 
 ```
@@ -93,6 +93,7 @@ Proxy-to-proxy security options:
 - `--insecure`: skip certificate verification (default for easy local testing)
 - `--ca PATH`: CA bundle to use when verification is enabled
 - `--timeout-ms MS`: optional coarse timeout for the TLS handshake and relay loop
+- `--ml-kem-512`: use ML-KEM-512 (post-quantum) key encapsulation mechanism for key exchange instead of classical ECDH. Requires OpenSSL 3.2+ with ML-KEM support.
 
 ### TLS local test flow (with dummy_station)
 

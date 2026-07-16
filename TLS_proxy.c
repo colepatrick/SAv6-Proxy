@@ -56,6 +56,8 @@ struct config {
 
     int verbose;   /* print detailed connection/TLS information */
     int log_keys;  /* dump sensitive key/symmetric material (debug only) */
+
+    int use_ml_kem_512; /* if non-zero, use ML-KEM-512 (post-quantum) for key exchange */
 };
 
 struct channel {
@@ -72,8 +74,8 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
         "Usage:\n"
-        "  %s --mode master   [--listen-host HOST] --listen-port PLAIN_PORT --connect-host PROXY_HOST --connect-port PROXY_PORT [--ca PATH] [--cert PATH --key PATH] [--insecure] [--timeout-ms MS] [--verbose] [--log-keys]\n"
-        "  %s --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT --cert PATH --key PATH [--ca PATH] [--insecure] [--timeout-ms MS] [--verbose] [--log-keys]\n\n"
+        "  %s --mode master   [--listen-host HOST] --listen-port PLAIN_PORT --connect-host PROXY_HOST --connect-port PROXY_PORT [--ca PATH] [--cert PATH --key PATH] [--insecure] [--timeout-ms MS] [--verbose] [--log-keys] [--ml-kem-512]\n"
+        "  %s --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT --cert PATH --key PATH [--ca PATH] [--insecure] [--timeout-ms MS] [--verbose] [--log-keys] [--ml-kem-512]\n\n"
         "This proxy replaces the SAV6 custom secure channel with standard TLS.\n"
         "Stations on each side see only raw plaintext bytes relayed through TLS.\n\n"
         "Common options:\n"
@@ -85,7 +87,9 @@ static void usage(const char *prog)
         "  --ca PATH            CA bundle to use when verifying (only if verification enabled)\n"
         "  --timeout-ms MS      optional timeout used for TLS handshake and relay loop; default 0 (blocking)\n"
         "  --verbose            print detailed TLS/cert/session information and per-read/write sizes\n"
-        "  --log-keys           ALSO dump sensitive key/symmetric material (includes TLS randoms; not safe for production)\n",
+        "  --log-keys           ALSO dump sensitive key/symmetric material (includes TLS randoms; not safe for production)\n"
+        "  --ml-kem-512         use ML-KEM-512 (post-quantum) key encapsulation mechanism for key exchange\n"
+        "                       Requires OpenSSL 3.2+ with ML-KEM support\n",
         prog, prog);
 }
 
@@ -209,6 +213,8 @@ static int parse_args(int argc, char **argv, struct config *cfg)
         } else if (strcmp(argv[i], "--log-keys") == 0) {
             cfg->log_keys = 1;
             cfg->verbose = 1;
+        } else if (strcmp(argv[i], "--ml-kem-512") == 0) {
+            cfg->use_ml_kem_512 = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
             return -1;
         } else {
@@ -291,6 +297,21 @@ static void print_cert_details(const char *label, X509 *cert)
 
 static int tls_configure_ctx_as_client(SSL_CTX *ctx, const struct config *cfg)
 {
+    /* Configure ML-KEM-512 (post-quantum) key exchange if requested */
+    if (cfg->use_ml_kem_512) {
+        /* Set TLS groups to prefer ML-KEM-512 for key encapsulation.
+         * MLKEM512 is the NIST-standardized post-quantum KEM (FIPS 203).
+         * This requires OpenSSL 3.2+ with ML-KEM support enabled. */
+        if (SSL_CTX_set1_groups_list(ctx, "MLKEM512") != 1) {
+            print_ssl_error("SSL_CTX_set1_groups_list(MLKEM512)");
+            fprintf(stderr, "Note: ML-KEM-512 requires OpenSSL 3.2+ with ML-KEM support\n");
+            return -1;
+        }
+        if (cfg->verbose) {
+            printf("Configured ML-KEM-512 (post-quantum) key exchange\n");
+        }
+    }
+
     if (!cfg->insecure || cfg->verify_peer) {
         if (cfg->ca_path) {
             if (!SSL_CTX_load_verify_locations(ctx, cfg->ca_path, NULL)) return -1;
@@ -371,6 +392,21 @@ done:
 
 static int tls_configure_ctx_as_server(SSL_CTX *ctx, const struct config *cfg)
 {
+    /* Configure ML-KEM-512 (post-quantum) key exchange if requested */
+    if (cfg->use_ml_kem_512) {
+        /* Set TLS groups to prefer ML-KEM-512 for key encapsulation.
+         * MLKEM512 is the NIST-standardized post-quantum KEM (FIPS 203).
+         * This requires OpenSSL 3.2+ with ML-KEM support enabled. */
+        if (SSL_CTX_set1_groups_list(ctx, "MLKEM512") != 1) {
+            print_ssl_error("SSL_CTX_set1_groups_list(MLKEM512)");
+            fprintf(stderr, "Note: ML-KEM-512 requires OpenSSL 3.2+ with ML-KEM support\n");
+            return -1;
+        }
+        if (cfg->verbose) {
+            printf("Configured ML-KEM-512 (post-quantum) key exchange\n");
+        }
+    }
+
     if (cfg->cert_path && cfg->key_path) {
         if (SSL_CTX_use_certificate_file(ctx, cfg->cert_path, SSL_FILETYPE_PEM) <= 0) return -1;
         if (SSL_CTX_use_PrivateKey_file(ctx, cfg->key_path, SSL_FILETYPE_PEM) <= 0) return -1;
