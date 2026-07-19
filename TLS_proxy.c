@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -335,6 +336,7 @@ static int tls_configure_ctx_as_client(SSL_CTX *ctx, const struct config *cfg)
 
 static int generate_self_signed_cert(SSL_CTX *ctx)
 {
+    clock_t start = clock();
     /* Ephemeral self-signed cert for lab/testing. */
     int rc = -1;
     EVP_PKEY *pkey = NULL;
@@ -395,6 +397,9 @@ done:
     if (x509) X509_free(x509);
     if (pctx) EVP_PKEY_CTX_free(pctx);
     if (pkey) EVP_PKEY_free(pkey);
+    clock_t end = clock(); 
+    double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
+    printf("Generate self cert Time elapsed: %.2f milliseconds\n", time_taken);
     return rc;
 }
 
@@ -809,7 +814,11 @@ static int relay_loop(struct channel *ch, int timeout_ms, const struct config *c
             int off = 0;
             while (off < n) {
                 tls_sslwrite_calls++;
+                clock_t start = clock();
                 int w = SSL_write(ch->ssl, plain_buf + off, (int)(n - off));
+                clock_t end = clock(); 
+                double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
+                printf("SSL write Time elapsed: %.2f milliseconds\n", time_taken);
                 if (w <= 0) {
                     int err = SSL_get_error(ch->ssl, w);
                     if (cfg->verbose) {
@@ -828,7 +837,11 @@ static int relay_loop(struct channel *ch, int timeout_ms, const struct config *c
         }
 
         if (FD_ISSET(ch->tcp_secure_sock, &rfds)) {
+            clock_t start2 = clock();
             int r = SSL_read(ch->ssl, tls_buf, sizeof(tls_buf));
+            clock_t end2 = clock(); 
+            double time_taken = ((double)(end2 - start2) / CLOCKS_PER_SEC) * 1000.0;
+            printf("SSL_read Time elapsed: %.2f milliseconds\n", time_taken);
             tls_sslread_calls++;
             if (cfg->verbose) {
                 printf("\n[relay] SSL_read() -> %d bytes\n", r);
