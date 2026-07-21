@@ -1153,12 +1153,16 @@ done:
  */
 static int receive_outstation_session_key(struct channel *ch, const unsigned char *wrapped, uint32_t wrapped_len)
 {
+    clock_t start = clock();
     log_step("Outstation session key establishment");
     log_hex("Received AES Key Wrap payload", wrapped, wrapped_len);
     if (aes_unwrap_key(ch->update_key, wrapped, (int)wrapped_len, ch->session_key) < 0) return -1;
     log_hex("Unwrapped AES-256-GCM session key", ch->session_key, SESSION_KEY_LEN);
     ch->recv_counter = 0;
     ch->messages_since_session_key = 0;
+    clock_t end = clock(); 
+    double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
+    printf("Receive and upwrap outstation session key Time elapsed: %.2f milliseconds\n", time_taken);
     return 0;
 }
 

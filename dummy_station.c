@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -246,6 +247,7 @@ static int run_outstation(const struct config *cfg)
     socket_t listener, client;
     unsigned char buf[BUF_SIZE];
     int seq = 1;
+    int seeded = 0;
 
     listener = listen_tcp(cfg->listen_host, cfg->listen_port);
     if (listener == INVALID_SOCKET) {
@@ -266,7 +268,7 @@ static int run_outstation(const struct config *cfg)
 
     for (;;) {
         int n = recv(client, (char *)buf, sizeof(buf), 0);
-        char ack[128];
+        char ack[300];
         int ack_len;
 
         if (n <= 0) break;
@@ -274,8 +276,29 @@ static int run_outstation(const struct config *cfg)
         print_plaintext(buf, n);
         ack_len = snprintf(ack, sizeof(ack), "DNP3_PLACEHOLDER_ACK seq=%d bytes=%d\n", seq++, n);
         if (ack_len < 0 || ack_len >= (int)sizeof(ack)) break;
+
+        /* Seed random number generator once */
+        if (!seeded) {
+            srand((unsigned int)time(NULL));
+            seeded = 1;
+        }
+
+        /* Generate random target size between current ack_len and 300 bytes */
+        int target_len = ack_len + (rand() % (301 - ack_len));
+        if (target_len > 300) target_len = 300;
+        if (target_len < ack_len) target_len = ack_len;
+
+        /* Pad with random bytes if needed */
+        if (target_len > ack_len) {
+            int pad_len = target_len - ack_len;
+            for (int i = 0; i < pad_len; i++) {
+                ack[ack_len + i] = (char)(rand() % 256);
+            }
+            ack_len = target_len;
+        }
+
         if (send_all(client, ack, (size_t)ack_len) < 0) break;
-        printf("sent plaintext response: %s", ack);
+        printf("sent plaintext response (%d bytes)\n", ack_len);
     }
 
     CLOSESOCK(client);
