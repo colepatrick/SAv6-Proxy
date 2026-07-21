@@ -80,10 +80,10 @@ General usage:
 
 ```sh
 # master-side: plaintext station -> TLS_proxy -> TLS -> outstation proxy
-./TLS_proxy --mode master   [--listen-host HOST] --listen-port PLAIN_PORT --connect-host TLS_PROXY_HOST --connect-port TLS_PROXY_PORT [--insecure] [--timeout-ms MS] [--ml-kem-512]
+./TLS_proxy --mode master   [--listen-host HOST] --listen-port PLAIN_PORT --connect-host TLS_PROXY_HOST --connect-port TLS_PROXY_PORT [--insecure] [--timeout-ms MS] [--ml-kem]
 
 # outstation-side: TLS server -> TLS_proxy -> plaintext station
-./TLS_proxy --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT [--cert SERVER_CERT.pem --key SERVER_KEY.pem] [--insecure] [--timeout-ms MS] [--ml-kem-512]
+./TLS_proxy --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT [--cert SERVER_CERT.pem --key SERVER_KEY.pem] [--insecure] [--timeout-ms MS] [--ml-kem]
 
 
 ```
