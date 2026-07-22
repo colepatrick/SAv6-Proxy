@@ -319,6 +319,15 @@ static int tls_configure_ctx_as_client(SSL_CTX *ctx, const struct config *cfg)
         if (cfg->verbose) {
             printf("Configured ML-KEM-512 (post-quantum) key exchange\n");
         }
+    } else {
+        /* Set TLS groups to prefer X25519 for key encapsulation.*/
+        if (SSL_CTX_set1_groups_list(ctx, "X25519") != 1) {
+            print_ssl_error("SSL_CTX_set1_groups_list(X25519)");
+            return -1;
+        }
+        if (cfg->verbose) {
+            printf("Configured ECDH key exchange\n");
+        }
     }
 
     if (!cfg->insecure || cfg->verify_peer) {
@@ -538,14 +547,17 @@ static int tls_handshake(SSL *ssl, struct config *cfg)
     }
 
     int rc;
+    clock_t start = clock();
     if (cfg->is_master) rc = SSL_connect(ssl);
     else rc = SSL_accept(ssl);
-
+    clock_t end = clock(); 
+    double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
+    printf("tls handshake Time elapsed: %.2f milliseconds\n", time_taken);
     if (rc != 1) {
         print_ssl_error(cfg->is_master ? "SSL_connect" : "SSL_accept");
         return -1;
     }
-    printf("Negotiated group: %s\n", SSL_get_negotiated_group(ssl));
+    printf("Negotiated group: %s\n", SSL_get0_group_name(ssl));
     return 0;
 }
 
@@ -1018,11 +1030,7 @@ int main(int argc, char **argv)
         SSL_set_fd(ch.ssl, (int)ch.tcp_secure_sock);
         printf("TLS-mesh master: performing TLS handshake to %s:%s\n", cfg.connect_host, cfg.connect_port);
 
-        clock_t start = clock();
         if (tls_handshake(ch.ssl, &cfg) < 0) goto done;
-        clock_t end = clock(); 
-        double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
-        printf("tls handshake Time elapsed: %.2f milliseconds\n", time_taken);
 
         printf("TLS-mesh master: TLS handshake complete; relaying plaintext bytes\n");
         print_tls_details(ch.ssl, &cfg);
@@ -1072,12 +1080,7 @@ int main(int argc, char **argv)
 
         SSL_set_fd(ch.ssl, (int)ch.tcp_secure_sock);
         printf("TLS-mesh outstation: performing TLS handshake\n");
-        clock_t start = clock();
         if (tls_handshake(ch.ssl, &cfg) < 0) goto done;
-        clock_t end = clock(); 
-        double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
-        printf("tls handshake Time elapsed: %.2f milliseconds\n", time_taken);
-
         printf("TLS-mesh outstation: TLS handshake complete; relaying plaintext bytes\n");
         print_tls_details(ch.ssl, &cfg);
 

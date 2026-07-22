@@ -478,7 +478,6 @@ static socket_t listen_tcp(const char *host, const char *port)
 static int hkdf_sha256(const unsigned char *secret, size_t secret_len,
                        const char *info, unsigned char out[UPDATE_KEY_LEN])
 {
-    clock_t start = clock();
     EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
     const unsigned char salt[] = "SAv6-proxy-update-key";
     int ok = 0;
@@ -495,14 +494,11 @@ static int hkdf_sha256(const unsigned char *secret, size_t secret_len,
         if (EVP_PKEY_derive(ctx, out, &out_len) <= 0 || out_len != UPDATE_KEY_LEN) goto done;
     }
     clock_t end2 = clock();
-    double time_taken2 = ((double)(end2 - start2) / CLOCKS_PER_SEC) * 1000.0;
-    printf("EVP_PKEY_derive Time elapsed: %.2f milliseconds\n", time_taken2);
     ok = 1;
 done:
     EVP_PKEY_CTX_free(ctx);
-    clock_t end = clock(); 
-    double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
-    printf("derive HKDF_SHA256 update key Time elapsed: %.2f milliseconds\n", time_taken);
+    double time_taken2 = ((double)(end2 - start2) / CLOCKS_PER_SEC) * 1000.0;
+    printf("EVP_PKEY_derive Time elapsed: %.2f milliseconds\n", time_taken2);
     return ok ? 0 : -1;
 }
 
@@ -572,7 +568,6 @@ static int get_raw_priv(EVP_PKEY *key, unsigned char **priv, size_t *priv_len)
 static int derive_x25519(EVP_PKEY *priv, const unsigned char *peer_pub, size_t peer_pub_len,
                          unsigned char update_key[UPDATE_KEY_LEN])
 {
-    clock_t start = clock();
     EVP_PKEY *peer = NULL;
     EVP_PKEY_CTX *ctx = NULL;
     unsigned char *secret = NULL;
@@ -606,9 +601,6 @@ done:
     free(secret);
     EVP_PKEY_CTX_free(ctx);
     EVP_PKEY_free(peer);
-    clock_t end = clock(); 
-    double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
-    printf("derive x25519 from HDKF into update key Time elapsed: %.2f milliseconds\n", time_taken);
     return ok ? 0 : -1;
 }
 
@@ -655,12 +647,12 @@ static int aes_unwrap_key(const unsigned char update_key[UPDATE_KEY_LEN],
                           const unsigned char *wrapped, int wrapped_len,
                           unsigned char session_key[SESSION_KEY_LEN])
 {
-    clock_t start = clock();
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     int len = 0, total = 0;
     unsigned char out[SESSION_KEY_LEN + 8];
     int ok = 0;
 
+    clock_t start = clock();
     if (!ctx) return -1;
     if (EVP_DecryptInit_ex(ctx, EVP_aes_256_wrap(), NULL, update_key, NULL) <= 0) goto done;
     if (EVP_DecryptUpdate(ctx, out, &len, wrapped, wrapped_len) <= 0) goto done;
@@ -669,11 +661,11 @@ static int aes_unwrap_key(const unsigned char update_key[UPDATE_KEY_LEN],
     total += len;
     if (total != SESSION_KEY_LEN) goto done;
     memcpy(session_key, out, SESSION_KEY_LEN);
+    clock_t end = clock(); 
     ok = 1;
 done:
     OPENSSL_cleanse(out, sizeof(out));
     EVP_CIPHER_CTX_free(ctx);
-    clock_t end = clock(); 
     double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
     printf("unwrap session key using AES key wrap Time elapsed: %.2f milliseconds\n", time_taken);
     return ok ? 0 : -1;
@@ -706,7 +698,6 @@ static int receive_outstation_session_key(struct channel *ch, const unsigned cha
  */
 static int send_encrypted(struct channel *ch, const unsigned char *plain, uint32_t plain_len)
 {
-    clock_t start = clock();
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     unsigned char nonce[GCM_NONCE_LEN], tag[GCM_TAG_LEN];
     unsigned char *buf = NULL;
@@ -714,6 +705,7 @@ static int send_encrypted(struct channel *ch, const unsigned char *plain, uint32
     uint32_t payload_len;
     int ok = -1;
 
+    clock_t start = clock();
     if (!ctx || plain_len > MAX_FRAME) goto done;
     build_nonce(ch->send_nonce_prefix, ch->send_counter++, nonce);
     buf = (unsigned char *)malloc(GCM_NONCE_LEN + plain_len + GCM_TAG_LEN);
@@ -728,6 +720,7 @@ static int send_encrypted(struct channel *ch, const unsigned char *plain, uint32
     if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, GCM_TAG_LEN, tag) <= 0) goto done;
     memcpy(buf + GCM_NONCE_LEN + total, tag, GCM_TAG_LEN);
     payload_len = (uint32_t)(GCM_NONCE_LEN + total + GCM_TAG_LEN);
+    clock_t end = clock(); 
     log_step("Encrypted outbound communication");
     printf("Plaintext bytes: %u\n", plain_len);
     log_hex("Plaintext", plain, plain_len);
@@ -744,7 +737,6 @@ static int send_encrypted(struct channel *ch, const unsigned char *plain, uint32
 done:
     free(buf);
     EVP_CIPHER_CTX_free(ctx);
-    clock_t end = clock(); 
     double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
     printf("Send_encrypted Time elapsed: %.2f milliseconds\n", time_taken);
     return ok;
@@ -756,7 +748,6 @@ done:
  */
 static int recv_encrypted(struct channel *ch, unsigned char **plain, uint32_t *plain_len)
 {
-    clock_t start = clock();
     EVP_CIPHER_CTX *ctx = NULL;
     unsigned char *payload = NULL;
     uint8_t type;
@@ -794,6 +785,7 @@ next_message:
     *plain_len = payload_len - GCM_NONCE_LEN - GCM_TAG_LEN;
     *plain = (unsigned char *)malloc(*plain_len ? *plain_len : 1);
     if (!*plain) goto done;
+    clock_t start = clock();
     ctx = EVP_CIPHER_CTX_new();
     if (!ctx) goto done;
     if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) <= 0) goto done;
@@ -805,6 +797,7 @@ next_message:
     if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, GCM_TAG_LEN,
             payload + GCM_NONCE_LEN + *plain_len) <= 0) goto done;
     if (EVP_DecryptFinal_ex(ctx, *plain + total, &len) <= 0) goto done;
+    clock_t end = clock(); 
     log_step("Decrypted inbound communication");
     printf("Encrypted frame payload bytes: %u\n", payload_len);
     log_hex("AES-256-GCM nonce", payload, GCM_NONCE_LEN);
@@ -823,7 +816,6 @@ done:
     }
     free(payload);
     EVP_CIPHER_CTX_free(ctx);
-    clock_t end = clock(); 
     double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
     printf("Receive_encrypted Time elapsed: %.2f milliseconds\n", time_taken);
     return ok;
@@ -882,7 +874,6 @@ static int parse_hello(const unsigned char *p, uint32_t len, uint8_t *alg,
  */
 static int ecdh_master_handshake(socket_t s, unsigned char update_key[UPDATE_KEY_LEN])
 {
-    clock_t start = clock();
     EVP_PKEY *key = make_x25519_key();
     unsigned char *pub = NULL, *priv = NULL, *payload = NULL;
     size_t pub_len = 0, priv_len = 0;
@@ -901,17 +892,14 @@ static int ecdh_master_handshake(socket_t s, unsigned char update_key[UPDATE_KEY
     if (recv_msg(s, &type, &payload, &len) < 0) goto done;
     if (type != MSG_SERVER_HELLO || parse_hello(payload, len, &alg, &body, &body_len) < 0) goto done;
     if (alg != ALG_ECDH_X25519) goto done;
-    log_hex("Received outstation X25519 public key", body, body_len);
     ok = derive_x25519(key, body, body_len, update_key);
+    log_hex("Received outstation X25519 public key", body, body_len);
 done:
     free(payload);
     if (priv) OPENSSL_cleanse(priv, priv_len);
     free(priv);
     free(pub);
     EVP_PKEY_free(key);
-    clock_t end = clock(); 
-    double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
-    printf("ECDH master handshake Time elapsed: %.2f milliseconds\n", time_taken);
     return ok;
 }
 
@@ -923,7 +911,6 @@ static int ecdh_outstation_handshake(socket_t s, const unsigned char *client_pub
                                      uint32_t client_pub_len,
                                      unsigned char update_key[UPDATE_KEY_LEN])
 {
-    clock_t start = clock();
     EVP_PKEY *key = make_x25519_key();
     unsigned char *pub = NULL, *priv = NULL;
     size_t pub_len = 0, priv_len = 0;
@@ -933,17 +920,18 @@ static int ecdh_outstation_handshake(socket_t s, const unsigned char *client_pub
     log_hex("Received master X25519 public key", client_pub, client_pub_len);
     if (!key || get_raw_pub(key, &pub, &pub_len) < 0 ||
         get_raw_priv(key, &priv, &priv_len) < 0 || pub_len > UINT32_MAX) goto done;
+    if (send_server_hello(s, ALG_ECDH_X25519, pub, (uint32_t)pub_len) < 0) goto done;
+    clock_t start = clock();
+    ok = derive_x25519(key, client_pub, client_pub_len, update_key);
+    clock_t end = clock(); 
     log_hex("Outstation X25519 private key", priv, priv_len);
     log_hex("Outstation X25519 public key", pub, pub_len);
     printf("Sending SERVER_HELLO with X25519 public key\n");
-    if (send_server_hello(s, ALG_ECDH_X25519, pub, (uint32_t)pub_len) < 0) goto done;
-    ok = derive_x25519(key, client_pub, client_pub_len, update_key);
 done:
     if (priv) OPENSSL_cleanse(priv, priv_len);
     free(priv);
     free(pub);
     EVP_PKEY_free(key);
-    clock_t end = clock(); 
     double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
     printf("ECDH outstation handshake Time elapsed: %.2f milliseconds\n", time_taken);
     return ok;
@@ -955,7 +943,6 @@ done:
  */
 static int mlkem_master_handshake(socket_t s, unsigned char update_key[UPDATE_KEY_LEN])
 {
-    clock_t start = clock();
     EVP_PKEY *peer = NULL;
     EVP_PKEY_CTX *pctx = NULL;
     unsigned char *payload = NULL;
@@ -973,8 +960,8 @@ static int mlkem_master_handshake(socket_t s, unsigned char update_key[UPDATE_KE
     if (recv_msg(s, &type, &payload, &len) < 0) goto done;
     if (type != MSG_SERVER_HELLO || parse_hello(payload, len, &alg, &body, &body_len) < 0) goto done;
     if (alg != ALG_MLKEM512) goto done;
-    log_hex("Received outstation ML-KEM-512 public key", body, body_len);
 
+    clock_t start = clock();
     pctx = EVP_PKEY_CTX_new_from_name(NULL, "ML-KEM-512", NULL);
     if (!pctx || EVP_PKEY_fromdata_init(pctx) <= 0) goto done;
     params[0] = OSSL_PARAM_construct_octet_string(OSSL_PKEY_PARAM_PUB_KEY,
@@ -983,7 +970,6 @@ static int mlkem_master_handshake(socket_t s, unsigned char update_key[UPDATE_KE
     if (EVP_PKEY_fromdata(pctx, &peer, EVP_PKEY_PUBLIC_KEY, params) <= 0) goto done;
     EVP_PKEY_CTX_free(pctx);
     pctx = EVP_PKEY_CTX_new_from_pkey(NULL, peer, NULL);
-    clock_t start2 = clock();
     if (!pctx || EVP_PKEY_encapsulate_init(pctx, NULL) <= 0) goto done;
     if (EVP_PKEY_encapsulate(pctx, NULL, &ciphertext_len, NULL, &secret_len) <= 0) goto done;
     ciphertext = (unsigned char *)malloc(ciphertext_len);
@@ -991,10 +977,11 @@ static int mlkem_master_handshake(socket_t s, unsigned char update_key[UPDATE_KE
     if (!ciphertext || !secret) goto done;
     if (EVP_PKEY_encapsulate(pctx, ciphertext, &ciphertext_len, secret, &secret_len) <= 0) goto done;
     if (ciphertext_len > UINT32_MAX) goto done;
-    log_hex("ML-KEM ciphertext sent to outstation", ciphertext, ciphertext_len);
-    log_hex("ML-KEM shared secret", secret, secret_len);
     if (send_msg(s, MSG_CLIENT_HELLO, ciphertext, (uint32_t)ciphertext_len) < 0) goto done;
     if (hkdf_sha256(secret, secret_len, "ML-KEM-512", update_key) < 0) goto done;
+    clock_t end = clock(); 
+    log_hex("ML-KEM ciphertext sent to outstation", ciphertext, ciphertext_len);
+    log_hex("ML-KEM shared secret", secret, secret_len);
     log_hex("ML-KEM HKDF-derived Update Key", update_key, UPDATE_KEY_LEN);
     ok = 0;
 done:
@@ -1004,7 +991,6 @@ done:
     free(payload);
     EVP_PKEY_CTX_free(pctx);
     EVP_PKEY_free(peer);
-    clock_t end = clock(); 
     double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
     printf("mlkem master handshake Time elapsed: %.2f milliseconds\n", time_taken);
     return ok;
@@ -1016,7 +1002,6 @@ done:
  */
 static int mlkem_outstation_handshake(socket_t s, unsigned char update_key[UPDATE_KEY_LEN])
 {
-    clock_t start = clock();
     EVP_PKEY *key = NULL;
     EVP_PKEY_CTX *pctx = NULL;
     unsigned char *public_key = NULL, *secret = NULL;
@@ -1047,20 +1032,22 @@ static int mlkem_outstation_handshake(socket_t s, unsigned char update_key[UPDAT
     if (recv_msg(s, &type, &payload, &len) < 0) goto done;
     if (type != MSG_CLIENT_HELLO) goto done;
     log_hex("Received master ML-KEM ciphertext", payload, len);
-    pctx = EVP_PKEY_CTX_new_from_pkey(NULL, key, NULL);
     clock_t start2 = clock();
+    pctx = EVP_PKEY_CTX_new_from_pkey(NULL, key, NULL);
     if (!pctx || EVP_PKEY_decapsulate_init(pctx, NULL) <= 0) goto done;
-    if (EVP_PKEY_decapsulate(pctx, NULL, &secret_len, payload, len) <= 0) {
-        clock_t end2 = clock();
-        double time_taken2 = ((double)(end2 - start2) / CLOCKS_PER_SEC) * 1000.0;
-        printf("EVP_PKEY_decapsulate Time elapsed: %.2f milliseconds\n", time_taken2);
-        goto done;
-    }
+    if (EVP_PKEY_decapsulate(pctx, NULL, &secret_len, payload, len) <= 0) goto done;
     secret = (unsigned char *)malloc(secret_len);
     if (!secret) goto done;
     if (EVP_PKEY_decapsulate(pctx, secret, &secret_len, payload, len) <= 0) goto done;
+    clock_t end2 = clock();
+    double time_taken2 = ((double)(end2 - start2) / CLOCKS_PER_SEC) * 1000.0;
+    printf("EVP_PKEY_decapsulate Time elapsed: %.2f milliseconds\n", time_taken2);
     log_hex("ML-KEM shared secret", secret, secret_len);
+    clock_t start = clock();
     if (hkdf_sha256(secret, secret_len, "ML-KEM-512", update_key) < 0) goto done;
+    clock_t end = clock();
+    double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
+    printf("Derive Update Key from ML-KEM shared secret Time elapsed: %.2f milliseconds\n", time_taken);
     log_hex("ML-KEM HKDF-derived Update Key", update_key, UPDATE_KEY_LEN);
     ok = 0;
 done:
@@ -1070,9 +1057,6 @@ done:
     free(payload);
     EVP_PKEY_CTX_free(pctx);
     EVP_PKEY_free(key);
-    clock_t end = clock(); 
-    double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
-    printf("mlkem oustation handshake Time elapsed: %.2f milliseconds\n", time_taken);
     return ok;
 }
 
@@ -1082,7 +1066,6 @@ done:
  */
 static int establish_master_update_key(struct channel *ch)
 {
-    clock_t start = clock();
     unsigned char update_key[UPDATE_KEY_LEN];
     int rc;
 
@@ -1098,9 +1081,6 @@ static int establish_master_update_key(struct channel *ch)
     memcpy(ch->update_key, update_key, UPDATE_KEY_LEN);
     ch->messages_since_update_key = 0;
     OPENSSL_cleanse(update_key, sizeof(update_key));
-    clock_t end = clock(); 
-    double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
-    printf("Establish master update key Time elapsed: %.2f milliseconds\n", time_taken);
     return 0;
 }
 
@@ -1111,7 +1091,6 @@ static int establish_master_update_key(struct channel *ch)
  */
 static int establish_outstation_update_key(struct channel *ch, const unsigned char *payload, uint32_t len)
 {
-    clock_t start = clock();
     unsigned char update_key[UPDATE_KEY_LEN];
     uint8_t alg;
     uint32_t body_len;
@@ -1135,9 +1114,6 @@ static int establish_outstation_update_key(struct channel *ch, const unsigned ch
     memcpy(ch->update_key, update_key, UPDATE_KEY_LEN);
     ch->messages_since_update_key = 0;
     OPENSSL_cleanse(update_key, sizeof(update_key));
-    clock_t end = clock(); 
-    double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
-    printf("Establish outstation update key Time elapsed: %.2f milliseconds\n", time_taken);
     return 0;
 }
 
@@ -1147,7 +1123,6 @@ static int establish_outstation_update_key(struct channel *ch, const unsigned ch
  */
 static int establish_master_session_key(struct channel *ch)
 {
-    clock_t start = clock();
     unsigned char *wrapped = NULL;
     int wrapped_len = 0;
     int ok = -1;
@@ -1164,9 +1139,6 @@ static int establish_master_session_key(struct channel *ch)
     ok = 0;
 done:
     free(wrapped);
-    clock_t end = clock(); 
-    double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
-    printf("Establish master session key Time elapsed: %.2f milliseconds\n", time_taken);
     return ok;
 }
 
@@ -1176,16 +1148,12 @@ done:
  */
 static int receive_outstation_session_key(struct channel *ch, const unsigned char *wrapped, uint32_t wrapped_len)
 {
-    clock_t start = clock();
     log_step("Outstation session key establishment");
     log_hex("Received AES Key Wrap payload", wrapped, wrapped_len);
     if (aes_unwrap_key(ch->update_key, wrapped, (int)wrapped_len, ch->session_key) < 0) return -1;
     log_hex("Unwrapped AES-256-GCM session key", ch->session_key, SESSION_KEY_LEN);
     ch->recv_counter = 0;
     ch->messages_since_session_key = 0;
-    clock_t end = clock(); 
-    double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
-    printf("Receive and upwrap outstation session key Time elapsed: %.2f milliseconds\n", time_taken);
     return 0;
 }
 
@@ -1231,7 +1199,6 @@ static int master_handshake(struct channel *ch)
  */
 static int outstation_handshake(struct channel *ch)
 {
-    clock_t start = clock();
     unsigned char *payload = NULL, *wrapped = NULL;
     uint8_t type;
     uint32_t len, wrapped_len;
@@ -1249,9 +1216,6 @@ static int outstation_handshake(struct channel *ch)
 done:
     free(payload);
     free(wrapped);
-    clock_t end = clock(); 
-    double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
-    printf("Outstation init handshake Time elapsed: %.2f milliseconds\n", time_taken);
     return ok;
 }
 
