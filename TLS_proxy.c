@@ -545,6 +545,7 @@ static int tls_handshake(SSL *ssl, struct config *cfg)
         print_ssl_error(cfg->is_master ? "SSL_connect" : "SSL_accept");
         return -1;
     }
+    printf("Negotiated group: %s\n", SSL_get_negotiated_group(ssl));
     return 0;
 }
 
@@ -1017,7 +1018,11 @@ int main(int argc, char **argv)
         SSL_set_fd(ch.ssl, (int)ch.tcp_secure_sock);
         printf("TLS-mesh master: performing TLS handshake to %s:%s\n", cfg.connect_host, cfg.connect_port);
 
+        clock_t start = clock();
         if (tls_handshake(ch.ssl, &cfg) < 0) goto done;
+        clock_t end = clock(); 
+        double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
+        printf("tls handshake Time elapsed: %.2f milliseconds\n", time_taken);
 
         printf("TLS-mesh master: TLS handshake complete; relaying plaintext bytes\n");
         print_tls_details(ch.ssl, &cfg);
@@ -1067,7 +1072,11 @@ int main(int argc, char **argv)
 
         SSL_set_fd(ch.ssl, (int)ch.tcp_secure_sock);
         printf("TLS-mesh outstation: performing TLS handshake\n");
+        clock_t start = clock();
         if (tls_handshake(ch.ssl, &cfg) < 0) goto done;
+        clock_t end = clock(); 
+        double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
+        printf("tls handshake Time elapsed: %.2f milliseconds\n", time_taken);
 
         printf("TLS-mesh outstation: TLS handshake complete; relaying plaintext bytes\n");
         print_tls_details(ch.ssl, &cfg);

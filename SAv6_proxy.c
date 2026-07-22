@@ -484,6 +484,7 @@ static int hkdf_sha256(const unsigned char *secret, size_t secret_len,
     int ok = 0;
 
     if (!ctx) return -1;
+    clock_t start2 = clock();
     if (EVP_PKEY_derive_init(ctx) <= 0) goto done;
     if (EVP_PKEY_CTX_set_hkdf_md(ctx, EVP_sha256()) <= 0) goto done;
     if (EVP_PKEY_CTX_set1_hkdf_salt(ctx, salt, sizeof(salt) - 1) <= 0) goto done;
@@ -493,6 +494,9 @@ static int hkdf_sha256(const unsigned char *secret, size_t secret_len,
         size_t out_len = UPDATE_KEY_LEN;
         if (EVP_PKEY_derive(ctx, out, &out_len) <= 0 || out_len != UPDATE_KEY_LEN) goto done;
     }
+    clock_t end2 = clock();
+    double time_taken2 = ((double)(end2 - start2) / CLOCKS_PER_SEC) * 1000.0;
+    printf("EVP_PKEY_derive Time elapsed: %.2f milliseconds\n", time_taken2);
     ok = 1;
 done:
     EVP_PKEY_CTX_free(ctx);
@@ -511,7 +515,11 @@ static EVP_PKEY *make_x25519_key(void)
     EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, NULL);
     EVP_PKEY *key = NULL;
     if (!ctx) return NULL;
+    clock_t start2 = clock();
     if (EVP_PKEY_keygen_init(ctx) <= 0) goto done;
+    clock_t end2 = clock();
+    double time_taken2 = ((double)(end2 - start2) / CLOCKS_PER_SEC) * 1000.0;
+    printf("EVP_PKEY_keygen_init Time elapsed: %.2f milliseconds\n", time_taken2);
     if (EVP_PKEY_keygen(ctx, &key) <= 0) {
         EVP_PKEY_free(key);
         key = NULL;
@@ -575,14 +583,22 @@ static int derive_x25519(EVP_PKEY *priv, const unsigned char *peer_pub, size_t p
     if (!peer) goto done;
     ctx = EVP_PKEY_CTX_new(priv, NULL);
     if (!ctx) goto done;
+    clock_t start2 = clock();
     if (EVP_PKEY_derive_init(ctx) <= 0) goto done;
     if (EVP_PKEY_derive_set_peer(ctx, peer) <= 0) goto done;
     if (EVP_PKEY_derive(ctx, NULL, &secret_len) <= 0) goto done;
     secret = (unsigned char *)malloc(secret_len);
     if (!secret) goto done;
     if (EVP_PKEY_derive(ctx, secret, &secret_len) <= 0) goto done;
+    clock_t end2 = clock();
+    double time_taken2 = ((double)(end2 - start2) / CLOCKS_PER_SEC) * 1000.0;
+    printf("EVP_PKEY_derive Time elapsed: %.2f milliseconds\n", time_taken2);
     log_hex("ECDH raw shared secret", secret, secret_len);
+    clock_t start3 = clock();
     if (hkdf_sha256(secret, secret_len, "ECDH-X25519", update_key) < 0) goto done;
+    clock_t end3 = clock();
+    double time_taken3 = ((double)(end3 - start3) / CLOCKS_PER_SEC) * 1000.0;
+    printf("hkdf_sha256 Time elapsed: %.2f milliseconds\n", time_taken3);
     log_hex("ECDH HKDF-derived Update Key", update_key, UPDATE_KEY_LEN);
     ok = 1;
 done:
@@ -967,6 +983,7 @@ static int mlkem_master_handshake(socket_t s, unsigned char update_key[UPDATE_KE
     if (EVP_PKEY_fromdata(pctx, &peer, EVP_PKEY_PUBLIC_KEY, params) <= 0) goto done;
     EVP_PKEY_CTX_free(pctx);
     pctx = EVP_PKEY_CTX_new_from_pkey(NULL, peer, NULL);
+    clock_t start2 = clock();
     if (!pctx || EVP_PKEY_encapsulate_init(pctx, NULL) <= 0) goto done;
     if (EVP_PKEY_encapsulate(pctx, NULL, &ciphertext_len, NULL, &secret_len) <= 0) goto done;
     ciphertext = (unsigned char *)malloc(ciphertext_len);
@@ -1031,8 +1048,14 @@ static int mlkem_outstation_handshake(socket_t s, unsigned char update_key[UPDAT
     if (type != MSG_CLIENT_HELLO) goto done;
     log_hex("Received master ML-KEM ciphertext", payload, len);
     pctx = EVP_PKEY_CTX_new_from_pkey(NULL, key, NULL);
+    clock_t start2 = clock();
     if (!pctx || EVP_PKEY_decapsulate_init(pctx, NULL) <= 0) goto done;
-    if (EVP_PKEY_decapsulate(pctx, NULL, &secret_len, payload, len) <= 0) goto done;
+    if (EVP_PKEY_decapsulate(pctx, NULL, &secret_len, payload, len) <= 0) {
+        clock_t end2 = clock();
+        double time_taken2 = ((double)(end2 - start2) / CLOCKS_PER_SEC) * 1000.0;
+        printf("EVP_PKEY_decapsulate Time elapsed: %.2f milliseconds\n", time_taken2);
+        goto done;
+    }
     secret = (unsigned char *)malloc(secret_len);
     if (!secret) goto done;
     if (EVP_PKEY_decapsulate(pctx, secret, &secret_len, payload, len) <= 0) goto done;
