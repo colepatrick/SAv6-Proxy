@@ -2281,6 +2281,14 @@ int main(int argc, char **argv)
     OSSL_PROVIDER *provider = NULL;
     int i;
 
+#ifdef _WIN32
+    /* MinGW/UCRT's CRT treats _IOLBF the same as full buffering for
+     * redirected streams, so line-buffering alone won't flush here. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+#else
+    setvbuf(stdout, NULL, _IOLBF, 0);
+#endif
+
     if (parse_args(argc, argv, &cfg) < 0) {
         usage(argv[0]);
         return 2;

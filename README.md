@@ -1,24 +1,31 @@
 # SAv6 Proxy and Dummy DNP3 Station
 
-This directory contains two small C programs:
+This directory contains three small C programs:
 
 - `SAv6_proxy.c`: a TCP proxy that accepts plaintext DNP3-SAv5 bytes on one side, protects the proxy-to-proxy connection with SAv6-style key establishment and AES-256-GCM, then forwards plaintext bytes to the remote endpoint.
+- `TLS_proxy.c`: the same plaintext-relay role as `SAv6_proxy.c`, but the proxy-to-proxy connection is standard TLS instead of the custom SAv6 protocol.
 - `dummy_station.c`: a plaintext-only dummy DNP3-like station used for testing the proxy path. It does not implement real DNP3; it only sends and receives readable test messages over TCP.
 
-The proxy treats DNP3 traffic as a byte stream. It does not parse DNP3 application data. Whatever plaintext bytes enter one proxy are encrypted, authenticated, sent to the other proxy, decrypted, and forwarded.
+Both proxies treat DNP3 traffic as a byte stream. Neither parses DNP3 application data. Whatever plaintext bytes enter one proxy are encrypted, authenticated, sent to the other proxy, decrypted, and forwarded.
 
 ## Build
 
-Build both programs:
+Build all three programs (`SAv6_proxy`, `TLS_proxy`, `dummy_station`):
 
 ```sh
 make
 ```
 
-Build only the proxy:
+Build only the SAv6 proxy:
 
 ```sh
 make proxy
+```
+
+Build only the TLS proxy:
+
+```sh
+make proxy-tls
 ```
 
 Build only the dummy station:
@@ -64,7 +71,7 @@ make OPENSSL_CPPFLAGS="-I/opt/openssl/include" \
      OPENSSL_LDLIBS="-lssl -lcrypto"
 ```
 
-ML-KEM mode requires OpenSSL 3.5 or newer with ML-KEM support. X25519 ECDH mode can work with older OpenSSL 3.x installations.
+ML-KEM mode requires a recent-enough OpenSSL with ML-KEM support: `SAv6_proxy`'s `--ml-kem` (raw ML-KEM keygen/encapsulate API) needs OpenSSL 3.5+; `TLS_proxy`'s `--ml-kem` (ML-KEM offered as a TLS group) needs OpenSSL 3.2+. X25519 ECDH mode (the default, no `--ml-kem` flag) works with older OpenSSL 3.x installations on either proxy.
 
 ## Programs
 
@@ -229,6 +236,31 @@ does; only widen `--listen` on a network you trust.
 
 ### SAv6 Proxy
 
+Executable: `SAv6_proxy(.exe)`
+
+General usage:
+
+```sh
+./SAv6_proxy --mode master [--listen-host HOST] --listen-port PLAIN_PORT --connect-host PROXY_HOST --connect-port PROXY_PORT [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]
+./SAv6_proxy --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]
+```
+
+On Windows, use `SAv6_proxy.exe`.
+
+Proxy options:
+
+- `--mode master`: accepts a local plaintext master/SAv5 connection, then connects to the remote secure proxy.
+- `--mode outstation`: accepts the secure proxy connection, then connects to the local plaintext outstation/SAv5 endpoint.
+- `--listen-host HOST`: optional local interface to bind. Use `127.0.0.1` for local-only testing. Omit it to listen on all interfaces.
+- `--listen-port PORT`: local port the proxy listens on.
+- `--connect-host HOST`: host/IP the proxy connects to.
+- `--connect-port PORT`: port the proxy connects to.
+- `--ml-kem`: use OpenSSL ML-KEM-512 instead of X25519 ECDH to establish the Update Key.
+- `--update-rekey-messages N`: establish a fresh Update Key after every `N` protected data frames observed by the master relay. `0` disables this.
+- `--session-rekey-messages M`: establish a fresh Session Key after every `M` protected data frames observed by the master relay. `0` disables this.
+
+The master proxy initiates runtime rekeying. The outstation proxy receives those control frames internally and does not forward them to the plaintext station.
+
 ### TLS Proxy (TLS-protected tunnel)
 
 The TLS variant replaces the SAV6-style secure proxy-to-proxy leg with standard TLS and relays raw plaintext bytes between stations.
@@ -251,8 +283,9 @@ Proxy-to-proxy security options:
 
 - `--insecure`: skip certificate verification (default for easy local testing)
 - `--ca PATH`: CA bundle to use when verification is enabled
+- `--verify-peer`: verify the peer certificate even when `--insecure` is also given (uses `--ca` if provided)
 - `--timeout-ms MS`: optional coarse timeout for the TLS handshake and relay loop
-- `--ml-kem-512`: use ML-KEM-512 (post-quantum) key encapsulation mechanism for key exchange instead of classical ECDH. Requires OpenSSL 3.2+ with ML-KEM support.
+- `--ml-kem`: use ML-KEM-512 (post-quantum) key encapsulation mechanism for key exchange instead of classical ECDH. Requires OpenSSL 3.2+ with ML-KEM support.
 
 ### TLS local test flow (with dummy_station)
 
@@ -290,33 +323,6 @@ Example ports:
 ```
 
 Stations themselves only see raw plaintext bytes; they do not need to know about TLS.
-
-
-General usage:
-
-
-
-
-```sh
-./SAv6_proxy --mode master [--listen-host HOST] --listen-port PLAIN_PORT --connect-host PROXY_HOST --connect-port PROXY_PORT [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]
-./SAv6_proxy --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]
-```
-
-On Windows, use `SAv6_proxy.exe`.
-
-Proxy options:
-
-- `--mode master`: accepts a local plaintext master/SAv5 connection, then connects to the remote secure proxy.
-- `--mode outstation`: accepts the secure proxy connection, then connects to the local plaintext outstation/SAv5 endpoint.
-- `--listen-host HOST`: optional local interface to bind. Use `127.0.0.1` for local-only testing. Omit it to listen on all interfaces.
-- `--listen-port PORT`: local port the proxy listens on.
-- `--connect-host HOST`: host/IP the proxy connects to.
-- `--connect-port PORT`: port the proxy connects to.
-- `--ml-kem`: use OpenSSL ML-KEM-512 instead of X25519 ECDH to establish the Update Key.
-- `--update-rekey-messages N`: establish a fresh Update Key after every `N` protected data frames observed by the master relay. `0` disables this.
-- `--session-rekey-messages M`: establish a fresh Session Key after every `M` protected data frames observed by the master relay. `0` disables this.
-
-The master proxy initiates runtime rekeying. The outstation proxy receives those control frames internally and does not forward them to the plaintext station.
 
 ### Dummy Station
 
@@ -393,6 +399,42 @@ On Windows, add `.exe` to the program names:
 .\SAv6_proxy.exe --mode master --listen-host 127.0.0.1 --listen-port 19999 --connect-host 127.0.0.1 --connect-port 20000 --update-rekey-messages 10 --session-rekey-messages 3
 .\dummy_station.exe --role master --connect-host 127.0.0.1 --connect-port 19999 --count 5
 ```
+
+### Point-to-multipoint on one computer
+
+The same idea extends to `--route`: one master process can serve several
+outstations, all on `127.0.0.1`, just on different ports per hop. This
+example runs one master and three outstations (seven processes total) on a
+single machine:
+
+```sh
+# 1. three plaintext outstations
+./dummy_station --role outstation --listen-host 127.0.0.1 --listen-port 20001
+./dummy_station --role outstation --listen-host 127.0.0.1 --listen-port 20002
+./dummy_station --role outstation --listen-host 127.0.0.1 --listen-port 20003
+
+# 2. three outstation-side proxies, each pointed at its own dummy_station
+./SAv6_proxy --mode outstation --listen-host 127.0.0.1 --listen-port 30001 --connect-host 127.0.0.1 --connect-port 20001
+./SAv6_proxy --mode outstation --listen-host 127.0.0.1 --listen-port 30002 --connect-host 127.0.0.1 --connect-port 20002
+./SAv6_proxy --mode outstation --listen-host 127.0.0.1 --listen-port 30003 --connect-host 127.0.0.1 --connect-port 20003
+
+# 3. one master process, one --route per outstation
+./SAv6_proxy --mode master --listen-host 127.0.0.1 \
+  --route 19991:127.0.0.1:30001 \
+  --route 19992:127.0.0.1:30002 \
+  --route 19993:127.0.0.1:30003
+
+# 4. a dummy master per outstation (or point real SAv5 software at 19991/19992/19993)
+./dummy_station --role master --connect-host 127.0.0.1 --connect-port 19991 --count 2
+./dummy_station --role master --connect-host 127.0.0.1 --connect-port 19992 --count 2
+./dummy_station --role master --connect-host 127.0.0.1 --connect-port 19993 --count 2
+```
+
+Start order still matters within each outstation's own chain (outstation
+before its proxy), but the three outstation chains and the master are
+otherwise independent of each other and can be started in any order relative
+to one another, as long as all three outstation proxies are up before the
+master starts routing traffic to them.
 
 ## Testing ML-KEM
 
