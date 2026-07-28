@@ -244,9 +244,8 @@ static int run_master(const struct config *cfg)
  */
 static int run_outstation(const struct config *cfg)
 {
-    socket_t listener, client;
+    socket_t listener;
     unsigned char buf[BUF_SIZE];
-    int seq = 1;
     int seeded = 0;
 
     listener = listen_tcp(cfg->listen_host, cfg->listen_port);
@@ -258,51 +257,57 @@ static int run_outstation(const struct config *cfg)
 
     printf("plaintext outstation listening on %s:%s\n",
            cfg->listen_host ? cfg->listen_host : "*", cfg->listen_port);
-    client = accept(listener, NULL, NULL);
-    CLOSESOCK(listener);
-    if (client == INVALID_SOCKET) {
-        fprintf(stderr, "accept failed\n");
-        return 1;
-    }
-    printf("plaintext outstation accepted connection\n");
 
     for (;;) {
-        int n = recv(client, (char *)buf, sizeof(buf), 0);
-        char ack[300];
-        int ack_len;
+        socket_t client = accept(listener, NULL, NULL);
+        int seq = 1;
 
-        if (n <= 0) break;
-        printf("received plaintext request: ");
-        print_plaintext(buf, n);
-        ack_len = snprintf(ack, sizeof(ack), "DNP3_PLACEHOLDER_ACK seq=%d bytes=%d\n", seq++, n);
-        if (ack_len < 0 || ack_len >= (int)sizeof(ack)) break;
-
-        /* Seed random number generator once */
-        if (!seeded) {
-            srand((unsigned int)time(NULL));
-            seeded = 1;
+        if (client == INVALID_SOCKET) {
+            fprintf(stderr, "accept failed\n");
+            break;
         }
+        printf("plaintext outstation accepted connection\n");
 
-        /* Generate random target size between current ack_len and 300 bytes */
-        int target_len = ack_len + (rand() % (301 - ack_len));
-        if (target_len > 300) target_len = 300;
-        if (target_len < ack_len) target_len = ack_len;
+        for (;;) {
+            int n = recv(client, (char *)buf, sizeof(buf), 0);
+            char ack[300];
+            int ack_len;
 
-        /* Pad with random bytes if needed */
-        if (target_len > ack_len) {
-            int pad_len = target_len - ack_len;
-            for (int i = 0; i < pad_len; i++) {
-                ack[ack_len + i] = (char)(rand() % 256);
+            if (n <= 0) break;
+            printf("received plaintext request: ");
+            print_plaintext(buf, n);
+            ack_len = snprintf(ack, sizeof(ack), "DNP3_PLACEHOLDER_ACK seq=%d bytes=%d\n", seq++, n);
+            if (ack_len < 0 || ack_len >= (int)sizeof(ack)) break;
+
+            /* Seed random number generator once */
+            if (!seeded) {
+                srand((unsigned int)time(NULL));
+                seeded = 1;
             }
-            ack_len = target_len;
+
+            /* Generate random target size between current ack_len and 300 bytes */
+            int target_len = ack_len + (rand() % (301 - ack_len));
+            if (target_len > 300) target_len = 300;
+            if (target_len < ack_len) target_len = ack_len;
+
+            /* Pad with random bytes if needed */
+            if (target_len > ack_len) {
+                int pad_len = target_len - ack_len;
+                for (int i = 0; i < pad_len; i++) {
+                    ack[ack_len + i] = (char)(rand() % 256);
+                }
+                ack_len = target_len;
+            }
+
+            if (send_all(client, ack, (size_t)ack_len) < 0) break;
+            printf("sent plaintext response (%d bytes)\n", ack_len);
         }
 
-        if (send_all(client, ack, (size_t)ack_len) < 0) break;
-        printf("sent plaintext response (%d bytes)\n", ack_len);
+        CLOSESOCK(client);
+        printf("plaintext outstation connection closed; waiting for next connection\n");
     }
 
-    CLOSESOCK(client);
-    printf("plaintext outstation connection closed\n");
+    CLOSESOCK(listener);
     return 0;
 }
 
