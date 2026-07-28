@@ -1,1 +1,8 @@
 *.exe
+__pycache__
+.env
+.claude
+*.pyc
+.vscode
+CLAUDE.md
+LAB_NOTES.md
