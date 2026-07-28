@@ -96,10 +96,7 @@ process multiple routes to front several local devices from one process).
 
 ```sh
 # master-side: one process serving three outstations
-./SAv6_proxy --mode master --listen-host 0.0.0.0 \
-  --route 19991:outstation1-proxy-host:20000 \
-  --route 19992:outstation2-proxy-host:20000 \
-  --route 19993:outstation3-proxy-host:20000
+./SAv6_proxy --mode master --listen-host 0.0.0.0 --route 19991:outstation1-proxy-host:20000 --route 19992:outstation2-proxy-host:20000 --route 19993:outstation3-proxy-host:20000
 
 # each outstation still runs its own single-route (or multi-route) process, e.g.
 ./SAv6_proxy --mode outstation --listen-host 0.0.0.0 --listen-port 20000 --connect-host 127.0.0.1 --connect-port 20001
