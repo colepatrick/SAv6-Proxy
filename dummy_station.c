@@ -45,6 +45,7 @@ struct config {
     const char *message;
     int count;
     unsigned int interval_ms;
+    unsigned int max_msg_size;  /* 0 means no limit */
 };
 
 /*
@@ -56,8 +57,8 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
         "Usage:\n"
-        "  %s --role master --connect-host HOST --connect-port PORT [--message TEXT] [--count N] [--interval-ms MS]\n"
-        "  %s --role outstation [--listen-host HOST] --listen-port PORT\n\n"
+        "  %s --role master --connect-host HOST --connect-port PORT [--message TEXT] [--count N] [--interval-ms MS] [--max-msg-size N]\n"
+        "  %s --role outstation [--listen-host HOST] --listen-port PORT [--max-msg-size N]\n\n"
         "This is a plaintext-only placeholder station for exercising the SAv6 proxy.\n"
         "Master connects and sends plaintext test messages.\n"
         "Outstation listens, prints plaintext bytes, and replies with plaintext ACKs.\n",
@@ -212,29 +213,57 @@ static int run_master(const struct config *cfg)
         return 1;
     }
 
+    size_t line_size = cfg->max_msg_size > 0 ? (size_t)cfg->max_msg_size + 1 : BUF_SIZE;
+    char *line = (char *)malloc(line_size);
+    if (!line) {
+        fprintf(stderr, "out of memory\n");
+        CLOSESOCK(s);
+        return 1;
+    }
+
     printf("plaintext master connected to %s:%s\n", cfg->connect_host, cfg->connect_port);
     for (i = 1; i <= cfg->count; i++) {
-        char line[BUF_SIZE];
-        int len = snprintf(line, sizeof(line), "%s seq=%d\n", cfg->message, i);
-        if (len < 0 || len >= (int)sizeof(line)) {
+        int len = snprintf(line, line_size, "%s seq=%d\n", cfg->message, i);
+        if (len < 0 || (size_t)len >= line_size) {
             fprintf(stderr, "message too long\n");
+            free(line);
             CLOSESOCK(s);
             return 1;
+        }
+        if (cfg->max_msg_size > 0 && (unsigned int)len > cfg->max_msg_size) {
+            int overhead = len - (int)strlen(cfg->message);
+            int allowed_payload = (int)cfg->max_msg_size - overhead;
+            if (allowed_payload < 0) {
+                fprintf(stderr, "max message size %u too small for control overhead\n", cfg->max_msg_size);
+                free(line);
+                CLOSESOCK(s);
+                return 1;
+            }
+            len = snprintf(line, line_size, "%.*s seq=%d\n", allowed_payload, cfg->message, i);
+            if (len < 0 || (size_t)len >= line_size) {
+                fprintf(stderr, "message formatting failed after max size adjustment\n");
+                free(line);
+                CLOSESOCK(s);
+                return 1;
+            }
         }
         printf("sending plaintext: %s", line);
         if (send_all(s, line, (size_t)len) < 0) {
             fprintf(stderr, "send failed\n");
+            free(line);
             CLOSESOCK(s);
             return 1;
         }
         if (wait_for_response(s, 2000) < 0) {
             fprintf(stderr, "connection closed while waiting for response\n");
+            free(line);
             CLOSESOCK(s);
             return 1;
         }
         if (i < cfg->count) sleep_ms(cfg->interval_ms);
     }
 
+    free(line);
     CLOSESOCK(s);
     return 0;
 }
@@ -245,13 +274,25 @@ static int run_master(const struct config *cfg)
 static int run_outstation(const struct config *cfg)
 {
     socket_t listener;
-    unsigned char buf[BUF_SIZE];
     int seeded = 0;
+    unsigned int recv_size = cfg->max_msg_size > 0 ? cfg->max_msg_size : BUF_SIZE;
+    unsigned int ack_cap = cfg->max_msg_size > 0 ? cfg->max_msg_size : BUF_SIZE;
+    unsigned char *buf = (unsigned char *)malloc((size_t)recv_size);
+    char *ack = (char *)malloc((size_t)ack_cap + 1);
+
+    if (!buf || !ack) {
+        fprintf(stderr, "out of memory\n");
+        free(buf);
+        free(ack);
+        return 1;
+    }
 
     listener = listen_tcp(cfg->listen_host, cfg->listen_port);
     if (listener == INVALID_SOCKET) {
         fprintf(stderr, "failed to listen on %s:%s\n",
                 cfg->listen_host ? cfg->listen_host : "*", cfg->listen_port);
+        free(buf);
+        free(ack);
         return 1;
     }
 
@@ -269,15 +310,20 @@ static int run_outstation(const struct config *cfg)
         printf("plaintext outstation accepted connection\n");
 
         for (;;) {
-            int n = recv(client, (char *)buf, sizeof(buf), 0);
-            char ack[300];
+            int n = recv(client, (char *)buf, (int)recv_size, 0);
             int ack_len;
 
             if (n <= 0) break;
+            if (cfg->max_msg_size > 0 && (unsigned int)n > cfg->max_msg_size) {
+                fprintf(stderr, "received request size %d exceeds max %u; closing connection\n",
+                        n, cfg->max_msg_size);
+                break;
+            }
             printf("received plaintext request: ");
             print_plaintext(buf, n);
-            ack_len = snprintf(ack, sizeof(ack), "DNP3_PLACEHOLDER_ACK seq=%d bytes=%d\n", seq++, n);
-            if (ack_len < 0 || ack_len >= (int)sizeof(ack)) break;
+            ack_len = snprintf(ack, (size_t)ack_cap + 1,
+                               "DNP3_PLACEHOLDER_ACK seq=%d bytes=%d\n", seq++, n);
+            if (ack_len < 0 || ack_len > (int)ack_cap) break;
 
             /* Seed random number generator once */
             if (!seeded) {
@@ -285,12 +331,13 @@ static int run_outstation(const struct config *cfg)
                 seeded = 1;
             }
 
-            /* Generate random target size between current ack_len and 300 bytes */
-            int target_len = ack_len + (rand() % (301 - ack_len));
-            if (target_len > 300) target_len = 300;
+            int target_len = ack_len + (rand() % ((int)ack_cap + 1 - ack_len));
+            if (target_len > (int)ack_cap) target_len = (int)ack_cap;
             if (target_len < ack_len) target_len = ack_len;
 
-            /* Pad with random bytes if needed */
+            if (cfg->max_msg_size > 0 && target_len > (int)cfg->max_msg_size) {
+                target_len = (int)cfg->max_msg_size;
+            }
             if (target_len > ack_len) {
                 int pad_len = target_len - ack_len;
                 for (int i = 0; i < pad_len; i++) {
@@ -306,6 +353,9 @@ static int run_outstation(const struct config *cfg)
         CLOSESOCK(client);
         printf("plaintext outstation connection closed; waiting for next connection\n");
     }
+
+    free(buf);
+    free(ack);
 
     CLOSESOCK(listener);
     return 0;
@@ -345,6 +395,7 @@ static int parse_args(int argc, char **argv, struct config *cfg)
     cfg->message = "DNP3_PLACEHOLDER_READ";
     cfg->count = 5;
     cfg->interval_ms = 1000;
+    cfg->max_msg_size = 0;
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--role") == 0 && i + 1 < argc) {
@@ -367,6 +418,8 @@ static int parse_args(int argc, char **argv, struct config *cfg)
             if (parse_int(argv[++i], &cfg->count) < 0) return -1;
         } else if (strcmp(argv[i], "--interval-ms") == 0 && i + 1 < argc) {
             if (parse_uint(argv[++i], &cfg->interval_ms) < 0) return -1;
+        } else if (strcmp(argv[i], "--max-msg-size") == 0 && i + 1 < argc) {
+            if (parse_uint(argv[++i], &cfg->max_msg_size) < 0) return -1;
         } else if (strcmp(argv[i], "--help") == 0) {
             return -1;
         } else {

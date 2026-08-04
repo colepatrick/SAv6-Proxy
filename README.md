@@ -6,6 +6,15 @@ This directory contains three small C programs:
 - `TLS_proxy.c`: the same plaintext-relay role as `SAv6_proxy.c`, but the proxy-to-proxy connection is standard TLS instead of the custom SAv6 protocol.
 - `dummy_station.c`: a plaintext-only dummy DNP3-like station used for testing the proxy path. It does not implement real DNP3; it only sends and receives readable test messages over TCP.
 
+### dummy_station max message size
+
+`dummy_station` now supports `--max-msg-size N` on both master and outstation roles.
+
+- On the master side, if a generated test message would exceed the configured maximum size, the message is truncated to fit.
+- On the outstation side, any received plaintext request larger than `N` is rejected.
+
+This is useful when you need to exercise the proxy with a strict payload size limit or avoid sending messages larger than a proxy/stack can handle.
+
 Both proxies treat DNP3 traffic as a byte stream. Neither parses DNP3 application data. Whatever plaintext bytes enter one proxy are encrypted, authenticated, sent to the other proxy, decrypted, and forwarded.
 
 ## Build
