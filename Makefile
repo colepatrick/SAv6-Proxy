@@ -27,7 +27,7 @@ OPENSSL_LDLIBS ?= $(shell $(PKG_CONFIG) --libs openssl 2>/dev/null)
 ifeq ($(strip $(OPENSSL_LDLIBS)),)
 OPENSSL_LDLIBS = -lssl -lcrypto
 endif
-SOCKET_LDLIBS ?=
+SOCKET_LDLIBS ?= -lpthread
 endif
 
 PROXY_TARGET ?= SAv6_proxy$(EXEEXT)
