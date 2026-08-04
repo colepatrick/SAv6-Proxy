@@ -43,6 +43,11 @@ typedef pthread_mutex_t mutex_t;
 #include <openssl/evp.h>
 #include <openssl/bn.h>
 
+/* Required when using OpenSSL Windows binaries built against a different CRT. */
+#ifdef _WIN32
+#include <openssl/applink.c>
+#endif
+
 #define BUF_SIZE 65536
 
 /*
@@ -206,8 +211,10 @@ static void usage(const char *prog)
         "  --route PORT:HOST:PORT   repeatable full listen+connect pairing; one thread and TLS session per\n"
         "                       route, so one process can serve several outstations (or front several local\n"
         "                       devices). Cannot be mixed with --listen-port/--connect-host/--connect-port.\n"
-        "  --insecure           do not verify peer certificate (default for convenience)\n"
-        "  --ca PATH            CA bundle to use when verifying (only if verification enabled)\n"
+        "  --cert PATH, --key PATH  local certificate and private key (required for mutual TLS)\n"
+        "  --ca PATH            peer CA bundle (required for mutual TLS)\n"
+        "  --no-auth            lab-only: disable peer authentication (and allow an ephemeral server cert)\n"
+        "  --insecure           alias for --no-auth\n"
         "  --timeout-ms MS      optional timeout used for TLS handshake and relay loop; default 0 (blocking)\n"
         "  --verbose            print detailed TLS/cert/session information and per-read/write sizes\n"
         "  --log-keys           ALSO dump sensitive key/symmetric material (includes TLS randoms; not safe for production)\n"
@@ -379,8 +386,10 @@ static int parse_args(int argc, char **argv, struct config *cfg)
     int admin_cmd_flags = 0;
 
     memset(cfg, 0, sizeof(*cfg));
-    cfg->insecure = 1; /* default to insecure for convenience */
-    cfg->auto_cert = 1; /* auto-generate outstation cert/key by default */
+    /* Authenticated TLS is the normal operating mode.  --insecure remains a
+     * deliberate lab-only escape hatch. */
+    cfg->insecure = 0;
+    cfg->auto_cert = 0;
     cfg->timeout_ms = 0;
     cfg->verbose = 0;
     cfg->log_keys = 0;
@@ -411,6 +420,10 @@ static int parse_args(int argc, char **argv, struct config *cfg)
             cfg->ca_path = argv[++i];
         } else if (strcmp(argv[i], "--insecure") == 0) {
             cfg->insecure = 1;
+            cfg->auto_cert = 1;
+        } else if (strcmp(argv[i], "--no-auth") == 0) {
+            cfg->insecure = 1;
+            cfg->auto_cert = 1;
         } else if (strcmp(argv[i], "--timeout-ms") == 0 && i + 1 < argc) {
             long v;
             if (parse_long(argv[++i], &v) < 0 || v < 0 || v > INT_MAX) return -1;
@@ -487,10 +500,10 @@ static int parse_args(int argc, char **argv, struct config *cfg)
         cfg->route_count = 1;
     }
 
-    /* Server needs either --cert/--key or auto-generated certs (outstation only). */
-    if (!cfg->is_master) {
-        if ((!cfg->cert_path || !cfg->key_path) && !cfg->auto_cert) return -1;
-    }
+    /* Mutual TLS needs an identity at each end and an explicit trust anchor.
+     * Do not silently fall back to system roots for a proxy-to-proxy channel. */
+    if (!cfg->insecure && (!cfg->cert_path || !cfg->key_path || !cfg->ca_path)) return -1;
+    if (!cfg->is_master && (!cfg->cert_path || !cfg->key_path) && !cfg->auto_cert) return -1;
 
     return 0;
 }
@@ -583,6 +596,12 @@ static int tls_configure_ctx_as_client(SSL_CTX *ctx, const struct config *cfg)
         }
     }
 
+    if (cfg->cert_path && cfg->key_path) {
+        if (SSL_CTX_use_certificate_file(ctx, cfg->cert_path, SSL_FILETYPE_PEM) <= 0 ||
+            SSL_CTX_use_PrivateKey_file(ctx, cfg->key_path, SSL_FILETYPE_PEM) <= 0 ||
+            !SSL_CTX_check_private_key(ctx)) return -1;
+    }
+
     if (!cfg->insecure || cfg->verify_peer) {
         if (cfg->ca_path) {
             if (!SSL_CTX_load_verify_locations(ctx, cfg->ca_path, NULL)) return -1;
@@ -598,6 +617,8 @@ static int tls_configure_ctx_as_client(SSL_CTX *ctx, const struct config *cfg)
 
 static int generate_self_signed_cert(SSL_CTX *ctx)
 {
+    /* SSL_connect/SSL_accept performs certificate proof and peer-chain
+     * validation. Keep logging outside these bounds. */
     clock_t start = clock();
     /* Ephemeral self-signed cert for lab/testing. */
     int rc = -1;
@@ -805,7 +826,7 @@ static int tls_handshake(SSL *ssl, const struct config *cfg)
     else rc = SSL_accept(ssl);
     clock_t end = clock(); 
     double time_taken = ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0;
-    printf("tls handshake Time elapsed: %.2f milliseconds\n", time_taken);
+    printf("Mutual TLS authentication and handshake Time elapsed: %.2f milliseconds\n", time_taken);
     if (rc != 1) {
         print_ssl_error(cfg->is_master ? "SSL_connect" : "SSL_accept");
         return -1;
@@ -1525,6 +1546,14 @@ static THREAD_RET THREAD_CALL master_route_thread(void *arg)
         }
         ch.ssl = SSL_new(ch.ssl_ctx);
         if (!ch.ssl) {
+            teardown_channel(&ch);
+            continue;
+        }
+        /* Bind server certificate validation to the configured endpoint name. */
+        if (!cfg->insecure && SSL_set1_host(ch.ssl, rs->connect_host) != 1) {
+            log_lock();
+            fprintf(stderr, "[route %d] could not configure TLS server-name verification\n", rs->id);
+            log_unlock();
             teardown_channel(&ch);
             continue;
         }

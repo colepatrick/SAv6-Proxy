@@ -41,6 +41,14 @@ typedef pthread_mutex_t mutex_t;
 #include <openssl/params.h>
 #include <openssl/rand.h>
 #include <openssl/provider.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+
+/* OpenSSL's Windows binaries may use a different C runtime than this program.
+ * Applink bridges FILE* operations used by PEM_read_*(). */
+#ifdef _WIN32
+#include <openssl/applink.c>
+#endif
 
 #define MAGIC "SAV6PXY1"
 #define MAGIC_LEN 8
@@ -53,6 +61,7 @@ typedef pthread_mutex_t mutex_t;
 #define MSG_WRAPPED_SESSION 3
 #define MSG_DATA 4
 #define MSG_CLOSE 5
+#define MSG_AUTH 6
 
 #define SESSION_KEY_LEN 32
 #define UPDATE_KEY_LEN 32
@@ -95,6 +104,11 @@ struct config {
     int route_count;
     uint64_t update_rekey_messages;
     uint64_t session_rekey_messages;
+    /* Mutual certificate authentication for the proxy-to-proxy handshake. */
+    const char *cert_path;
+    const char *key_path;
+    const char *ca_path;
+    int no_auth; /* explicit lab-only opt-out of peer authentication */
 
     /* Admin control channel (server side): set control_port to enable it. */
     const char *control_host;
@@ -330,8 +344,8 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
         "Usage (single point-to-point route):\n"
-        "  %s --mode master [--listen-host HOST] --listen-port PLAIN_PORT --connect-host PROXY_HOST --connect-port PROXY_PORT [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]\n"
-        "  %s --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]\n\n"
+        "  %s --mode master [--listen-host HOST] --listen-port PLAIN_PORT --connect-host PROXY_HOST --connect-port PROXY_PORT (--cert CERT.pem --key KEY.pem --ca CA.pem | --no-auth) [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]\n"
+        "  %s --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT (--cert CERT.pem --key KEY.pem --ca CA.pem | --no-auth) [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]\n\n"
         "Usage (point-to-multipoint, one process serving several outstations):\n"
         "  %s --mode master [--listen-host HOST] --route PLAIN_PORT:PROXY_HOST:PROXY_PORT [--route ...] [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]\n"
         "  %s --mode outstation [--listen-host HOST] --route PROXY_PORT:SAv5_HOST:SAv5_PORT [--route ...] [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]\n\n"
@@ -342,6 +356,8 @@ static void usage(const char *prog)
         "front multiple local devices from one outstation-side process. --route may be\n"
         "repeated instead of, but not mixed with, the single-route --listen-port/--connect-host/--connect-port flags.\n"
         "If --listen-host is omitted, the proxy listens on all local interfaces.\n"
+        "Both peers authenticate with their --cert/--key and verify the peer against --ca.\n"
+        "Use --no-auth only for local/lab compatibility testing; it disables peer authentication.\n"
         "Rekey intervals default to 0, which disables automatic rekeying, and apply to every route.\n"
         "A route's process keeps serving new connections after a session ends (reconnect-safe).\n\n"
         "Optional admin control channel (add/remove routes at runtime, no restart):\n"
@@ -999,6 +1015,117 @@ static int send_server_hello(socket_t s, uint8_t alg, const unsigned char *body,
     return send_hello(s, MSG_SERVER_HELLO, alg, body, body_len);
 }
 
+/* Authenticate a fresh key-establishment result.  The certificate and
+ * signature travel together in MSG_AUTH; the signature covers the derived
+ * update key, so an old proof cannot be replayed into another handshake. */
+static int send_authentication(struct channel *ch, const struct config *cfg)
+{
+    FILE *cert_file = NULL, *key_file = NULL;
+    X509 *cert = NULL;
+    EVP_PKEY *key = NULL;
+    unsigned char *der = NULL, *p, proof[sizeof("SAV6-AUTH-v1") + UPDATE_KEY_LEN];
+    unsigned char *payload = NULL;
+    size_t sig_len = 0;
+    int der_len, ok = -1;
+    clock_t start = clock();
+
+    cert_file = fopen(cfg->cert_path, "rb");
+    key_file = fopen(cfg->key_path, "rb");
+    if (!cert_file || !key_file) goto done;
+    cert = PEM_read_X509(cert_file, NULL, NULL, NULL);
+    key = PEM_read_PrivateKey(key_file, NULL, NULL, NULL);
+    if (!cert || !key || X509_check_private_key(cert, key) != 1) goto done;
+    der_len = i2d_X509(cert, NULL);
+    if (der_len <= 0 || (uint32_t)der_len > MAX_FRAME) goto done;
+    der = (unsigned char *)malloc((size_t)der_len);
+    if (!der) goto done;
+    p = der;
+    if (i2d_X509(cert, &p) != der_len) goto done;
+    proof[0] = ch->is_master ? 'M' : 'O';
+    memcpy(proof + 1, "SAV6-AUTH-v1", sizeof("SAV6-AUTH-v1") - 1);
+    memcpy(proof + sizeof("SAV6-AUTH-v1"), ch->update_key, UPDATE_KEY_LEN);
+    {
+        EVP_MD_CTX *md = EVP_MD_CTX_new();
+        if (!md) goto done;
+        if (EVP_DigestSignInit(md, NULL, EVP_sha256(), NULL, key) != 1 ||
+            EVP_DigestSign(md, NULL, &sig_len, proof, sizeof(proof)) != 1) {
+            EVP_MD_CTX_free(md); goto done;
+        }
+        payload = (unsigned char *)malloc(4u + (size_t)der_len + sig_len);
+        if (!payload || EVP_DigestSign(md, payload + 4 + der_len, &sig_len,
+                                       proof, sizeof(proof)) != 1) {
+            EVP_MD_CTX_free(md); goto done;
+        }
+        EVP_MD_CTX_free(md);
+    }
+    if (sig_len > MAX_FRAME - 4u - (uint32_t)der_len) goto done;
+    { uint32_t n = htonl((uint32_t)der_len); memcpy(payload, &n, sizeof(n)); }
+    memcpy(payload + 4, der, (size_t)der_len);
+    if (send_msg(ch->secure_sock, MSG_AUTH, payload,
+                 (uint32_t)(4u + (size_t)der_len + sig_len)) < 0) goto done;
+    ok = 0;
+done:
+    if (cert_file) fclose(cert_file);
+    if (key_file) fclose(key_file);
+    EVP_PKEY_free(key);
+    X509_free(cert);
+    free(der);
+    free(payload);
+    clock_t end = clock();
+    printf("SAv6 local certificate authentication Time elapsed: %.2f milliseconds\n",
+           ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0);
+    return ok;
+}
+
+static int verify_authentication(struct channel *ch, const struct config *cfg)
+{
+    uint8_t type;
+    uint32_t len, cert_len_n, cert_len;
+    unsigned char *payload = NULL, proof[sizeof("SAV6-AUTH-v1") + UPDATE_KEY_LEN];
+    const unsigned char *p;
+    X509 *cert = NULL;
+    EVP_PKEY *peer_key = NULL;
+    X509_STORE *store = NULL;
+    X509_STORE_CTX *store_ctx = NULL;
+    int ok = -1;
+
+    if (recv_msg(ch->secure_sock, &type, &payload, &len) < 0 || type != MSG_AUTH || len < 5) goto done;
+    clock_t start = clock();
+    memcpy(&cert_len_n, payload, sizeof(cert_len_n));
+    cert_len = ntohl(cert_len_n);
+    if (cert_len == 0 || cert_len > len - 4 || len - 4 - cert_len == 0) goto done;
+    p = payload + 4;
+    cert = d2i_X509(NULL, &p, (long)cert_len);
+    if (!cert || p != payload + 4 + cert_len) goto done;
+    store = X509_STORE_new();
+    store_ctx = X509_STORE_CTX_new();
+    if (!store || !store_ctx || X509_STORE_load_locations(store, cfg->ca_path, NULL) != 1 ||
+        X509_STORE_CTX_init(store_ctx, store, cert, NULL) != 1 ||
+        X509_verify_cert(store_ctx) != 1) goto done;
+    peer_key = X509_get_pubkey(cert);
+    proof[0] = ch->is_master ? 'O' : 'M';
+    memcpy(proof + 1, "SAV6-AUTH-v1", sizeof("SAV6-AUTH-v1") - 1);
+    memcpy(proof + sizeof("SAV6-AUTH-v1"), ch->update_key, UPDATE_KEY_LEN);
+    {
+        EVP_MD_CTX *md = EVP_MD_CTX_new();
+        if (!md) goto done;
+        ok = peer_key && EVP_DigestVerifyInit(md, NULL, EVP_sha256(), NULL, peer_key) == 1 &&
+             EVP_DigestVerify(md, payload + 4 + cert_len, len - 4 - cert_len,
+                              proof, sizeof(proof)) == 1 ? 0 : -1;
+        EVP_MD_CTX_free(md);
+    }
+done:
+    free(payload);
+    EVP_PKEY_free(peer_key);
+    X509_STORE_CTX_free(store_ctx);
+    X509_STORE_free(store);
+    X509_free(cert);
+    clock_t end = clock();
+    printf("SAv6 peer certificate authentication Time elapsed: %.2f milliseconds\n",
+           ((double)(end - start) / CLOCKS_PER_SEC) * 1000.0);
+    return ok;
+}
+
 /*
  * Parse the HELLO frame header and extract the negotiated algorithm and body payload.
  */
@@ -1339,9 +1466,11 @@ static int maybe_master_rekey(struct channel *ch)
     return 0;
 }
 
-static int master_handshake(struct channel *ch)
+static int master_handshake(struct channel *ch, const struct config *cfg)
 {
     if (establish_master_update_key(ch) < 0) return -1;
+    if (!cfg->no_auth &&
+        (send_authentication(ch, cfg) < 0 || verify_authentication(ch, cfg) < 0)) return -1;
     return establish_master_session_key(ch);
 }
 
@@ -1350,7 +1479,7 @@ static int master_handshake(struct channel *ch)
  * The outstation first handles the CLIENT_HELLO, establishes the update key,
  * then receives and unwraps the wrapped session key.
  */
-static int outstation_handshake(struct channel *ch)
+static int outstation_handshake(struct channel *ch, const struct config *cfg)
 {
     clock_t start = clock();
     unsigned char *payload = NULL, *wrapped = NULL;
@@ -1363,6 +1492,8 @@ static int outstation_handshake(struct channel *ch)
     if (establish_outstation_update_key(ch, payload, len) < 0) goto done;
     free(payload);
     payload = NULL;
+    if (!cfg->no_auth &&
+        (verify_authentication(ch, cfg) < 0 || send_authentication(ch, cfg) < 0)) goto done;
     if (recv_msg(ch->secure_sock, &type, &wrapped, &wrapped_len) < 0) goto done;
     if (type != MSG_WRAPPED_SESSION) goto done;
     if (receive_outstation_session_key(ch, wrapped, wrapped_len) < 0) goto done;
@@ -1559,6 +1690,14 @@ static int parse_args(int argc, char **argv, struct config *cfg)
             i++;
             if (add_route_from_spec(cfg, argv[i]) < 0) return -1;
             route_flag_used = 1;
+        } else if (strcmp(argv[i], "--cert") == 0 && i + 1 < argc) {
+            cfg->cert_path = argv[++i];
+        } else if (strcmp(argv[i], "--key") == 0 && i + 1 < argc) {
+            cfg->key_path = argv[++i];
+        } else if (strcmp(argv[i], "--ca") == 0 && i + 1 < argc) {
+            cfg->ca_path = argv[++i];
+        } else if (strcmp(argv[i], "--no-auth") == 0) {
+            cfg->no_auth = 1;
         } else if (strcmp(argv[i], "--ml-kem") == 0) {
             cfg->use_ml_kem = 1;
         } else if (strcmp(argv[i], "--update-rekey-messages") == 0 && i + 1 < argc) {
@@ -1608,6 +1747,7 @@ static int parse_args(int argc, char **argv, struct config *cfg)
     if (admin_cmd_flags) return -1; /* --add/--remove/--list only make sense with --admin */
 
     if (!mode_set) return -1;
+    if (!cfg->no_auth && (!cfg->cert_path || !cfg->key_path || !cfg->ca_path)) return -1;
     if (cfg->announce_admin_host && cfg->is_master) return -1; /* self-registration only makes sense for outstations */
     if (route_flag_used) {
         if (legacy_listen_port || legacy_connect_host || legacy_connect_port) return -1;
@@ -1666,6 +1806,9 @@ struct route_slot {
  * address.
  */
 static mutex_t g_routes_mutex;
+/* Immutable for the process lifetime; route threads use it for certificate
+ * authentication while route topology remains independently mutable. */
+static const struct config *g_auth_cfg;
 static struct route_slot **g_routes = NULL;
 static int g_route_count = 0;
 static int g_route_capacity = 0;
@@ -1952,7 +2095,7 @@ static THREAD_RET THREAD_CALL master_route_thread(void *arg)
         memcpy(ch.send_nonce_prefix, "SAm0", 4);
         ch.secure_sock = connected;
 
-        if (master_handshake(&ch) < 0) {
+        if (master_handshake(&ch, g_auth_cfg) < 0) {
             log_lock();
             fprintf(stderr, "[route %d] master handshake failed\n", rs->id);
             log_unlock();
@@ -2037,7 +2180,7 @@ static THREAD_RET THREAD_CALL outstation_route_thread(void *arg)
         memcpy(ch.send_nonce_prefix, "SAo0", 4);
         ch.secure_sock = accepted;
 
-        if (outstation_handshake(&ch) < 0) {
+        if (outstation_handshake(&ch, g_auth_cfg) < 0) {
             log_lock();
             fprintf(stderr, "[route %d] outstation handshake failed\n", rs->id);
             log_unlock();
@@ -2306,6 +2449,7 @@ int main(int argc, char **argv)
 
     mutex_init(&g_log_mutex);
     mutex_init(&g_routes_mutex);
+    g_auth_cfg = &cfg;
     /* Load default provider for ML-KEM and other algorithms */
     provider = OSSL_PROVIDER_load(NULL, "default");
     if (!provider) {

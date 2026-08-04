@@ -2,7 +2,7 @@
 
 This directory contains three small C programs:
 
-- `SAv6_proxy.c`: a TCP proxy that accepts plaintext DNP3-SAv5 bytes on one side, protects the proxy-to-proxy connection with SAv6-style key establishment and AES-256-GCM, then forwards plaintext bytes to the remote endpoint.
+- `SAv6_proxy.c`: a TCP proxy that accepts plaintext DNP3-SAv5 bytes on one side, protects the proxy-to-proxy connection with SAv6-style key establishment, mutual certificate authentication, and AES-256-GCM, then forwards plaintext bytes to the remote endpoint.
 - `TLS_proxy.c`: the same plaintext-relay role as `SAv6_proxy.c`, but the proxy-to-proxy connection is standard TLS instead of the custom SAv6 protocol.
 - `dummy_station.c`: a plaintext-only dummy DNP3-like station used for testing the proxy path. It does not implement real DNP3; it only sends and receives readable test messages over TCP.
 
@@ -72,6 +72,47 @@ make OPENSSL_CPPFLAGS="-I/opt/openssl/include" \
 ```
 
 ML-KEM mode requires a recent-enough OpenSSL with ML-KEM support: `SAv6_proxy`'s `--ml-kem` (raw ML-KEM keygen/encapsulate API) needs OpenSSL 3.5+; `TLS_proxy`'s `--ml-kem` (ML-KEM offered as a TLS group) needs OpenSSL 3.2+. X25519 ECDH mode (the default, no `--ml-kem` flag) works with older OpenSSL 3.x installations on either proxy.
+
+## Generating Certificates for Authenticated Proxies
+
+Both proxies use mutual certificate authentication by default. Create a private
+CA and one certificate/key pair for each proxy. The following PowerShell
+commands create localhost test credentials; change the outstation certificate's
+DNS/IP subject alternative names to match the value used for the TLS master's
+`--connect-host` in a real deployment.
+
+```powershell
+New-Item -ItemType Directory -Force certs
+Set-Location certs
+
+# Private CA
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out ca-key.pem
+openssl req -x509 -new -key ca-key.pem -sha256 -days 3650 -out ca-cert.pem `
+  -subj "/CN=Proxy Test CA" `
+  -addext "basicConstraints=critical,CA:TRUE" `
+  -addext "keyUsage=critical,keyCertSign,cRLSign"
+
+# Master proxy certificate
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out master-key.pem
+openssl req -new -key master-key.pem -out master.csr `
+  -subj "/CN=master-proxy" `
+  -addext "extendedKeyUsage=serverAuth,clientAuth"
+openssl x509 -req -in master.csr -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial `
+  -out master-cert.pem -days 365 -sha256 -copy_extensions copy
+
+# Outstation proxy certificate for a localhost test
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out outstation-key.pem
+openssl req -new -key outstation-key.pem -out outstation.csr `
+  -subj "/CN=localhost" `
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" `
+  -addext "extendedKeyUsage=serverAuth,clientAuth"
+openssl x509 -req -in outstation.csr -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial `
+  -out outstation-cert.pem -days 365 -sha256 -copy_extensions copy
+```
+
+Pass `--cert`, `--key`, and `--ca certs/ca-cert.pem` to each proxy, using its
+own certificate/key pair. Keep private keys out of version control. For local
+compatibility testing without credentials, start both peers with `--no-auth`.
 
 ## Programs
 
@@ -238,8 +279,8 @@ Executable: `SAv6_proxy(.exe)`
 General usage:
 
 ```sh
-./SAv6_proxy --mode master [--listen-host HOST] --listen-port PLAIN_PORT --connect-host PROXY_HOST --connect-port PROXY_PORT [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]
-./SAv6_proxy --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]
+./SAv6_proxy --mode master [--listen-host HOST] --listen-port PLAIN_PORT --connect-host PROXY_HOST --connect-port PROXY_PORT --cert CERT.pem --key KEY.pem --ca CA.pem [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]
+./SAv6_proxy --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT --cert CERT.pem --key KEY.pem --ca CA.pem [--ml-kem] [--update-rekey-messages N] [--session-rekey-messages M]
 ```
 
 On Windows, use `SAv6_proxy.exe`.
@@ -252,6 +293,8 @@ Proxy options:
 - `--listen-port PORT`: local port the proxy listens on.
 - `--connect-host HOST`: host/IP the proxy connects to.
 - `--connect-port PORT`: port the proxy connects to.
+- `--cert PATH`, `--key PATH`, and `--ca PATH`: local certificate/key and the CA bundle used to authenticate the other proxy. These are required on both peers.
+- `--no-auth`: lab-only compatibility mode; skip SAv6 peer authentication and permit running without certificate files.
 - `--ml-kem`: use OpenSSL ML-KEM-512 instead of X25519 ECDH to establish the Update Key.
 - `--update-rekey-messages N`: establish a fresh Update Key after every `N` protected data frames observed by the master relay. `0` disables this.
 - `--session-rekey-messages M`: establish a fresh Session Key after every `M` protected data frames observed by the master relay. `0` disables this.
@@ -268,23 +311,27 @@ General usage:
 
 ```sh
 # master-side: plaintext station -> TLS_proxy -> TLS -> outstation proxy
-./TLS_proxy --mode master   [--listen-host HOST] --listen-port PLAIN_PORT --connect-host TLS_PROXY_HOST --connect-port TLS_PROXY_PORT [--insecure] [--timeout-ms MS] [--ml-kem]
+./TLS_proxy --mode master   [--listen-host HOST] --listen-port PLAIN_PORT --connect-host TLS_PROXY_HOST --connect-port TLS_PROXY_PORT --cert MASTER_CERT.pem --key MASTER_KEY.pem --ca CA.pem [--timeout-ms MS] [--ml-kem]
 
 # outstation-side: TLS server -> TLS_proxy -> plaintext station
-./TLS_proxy --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT [--cert SERVER_CERT.pem --key SERVER_KEY.pem] [--insecure] [--timeout-ms MS] [--ml-kem]
+./TLS_proxy --mode outstation [--listen-host HOST] --listen-port PROXY_PORT --connect-host SAv5_HOST --connect-port SAv5_PORT --cert OUTSTATION_CERT.pem --key OUTSTATION_KEY.pem --ca CA.pem [--timeout-ms MS] [--ml-kem]
 
 
 ```
 
 Proxy-to-proxy security options:
 
-- `--insecure`: skip certificate verification (default for easy local testing)
-- `--ca PATH`: CA bundle to use when verification is enabled
+- `--cert PATH` and `--key PATH`: local certificate and private key; required on both peers.
+- `--ca PATH`: CA bundle used to authenticate the peer certificate; required on both peers.
+- `--no-auth`: lab-only compatibility mode; run TLS without client/server peer authentication and use an ephemeral server certificate if no files are provided. `--insecure` is an alias.
 - `--verify-peer`: verify the peer certificate even when `--insecure` is also given (uses `--ca` if provided)
 - `--timeout-ms MS`: optional coarse timeout for the TLS handshake and relay loop
 - `--ml-kem`: use ML-KEM-512 (post-quantum) key encapsulation mechanism for key exchange instead of classical ECDH. Requires OpenSSL 3.2+ with ML-KEM support.
 
 ### TLS local test flow (with dummy_station)
+
+First run the certificate-generation commands above. These examples use the
+resulting files from the repository root (`certs/...`).
 
 Example ports:
 
@@ -303,14 +350,14 @@ Example ports:
 2) Start TLS outstation proxy (TLS server):
 
 ```sh
-./TLS_proxy --mode outstation --listen-host 127.0.0.1 --listen-port 20000 --connect-host 127.0.0.1 --connect-port 20001 --verbose --log-keys
+./TLS_proxy --mode outstation --listen-host 127.0.0.1 --listen-port 20000 --connect-host 127.0.0.1 --connect-port 20001 --cert certs/outstation-cert.pem --key certs/outstation-key.pem --ca certs/ca-cert.pem --verbose --log-keys
 
 ```
 
 3) Start TLS master proxy (TLS client):
 
 ```sh
-./TLS_proxy --mode master --listen-host 127.0.0.1 --listen-port 19999 --connect-host 127.0.0.1 --connect-port 20000 --verbose --log-keys
+./TLS_proxy --mode master --listen-host 127.0.0.1 --listen-port 19999 --connect-host 127.0.0.1 --connect-port 20000 --cert certs/master-cert.pem --key certs/master-key.pem --ca certs/ca-cert.pem --verbose --log-keys
 ```
 
 4) Start plaintext dummy master:
@@ -347,6 +394,8 @@ Dummy station options:
 ## Running Everything on One Computer
 
 You can run both proxies and both dummy stations on the same machine. Use different localhost ports:
+Run the certificate-generation commands above first; this SAv6 flow uses the
+same `certs/...` files.
 
 ```text
 dummy master
@@ -373,13 +422,13 @@ Start the dummy outstation:
 Start the outstation-side proxy:
 
 ```sh
-./SAv6_proxy --mode outstation --listen-host 127.0.0.1 --listen-port 20000 --connect-host 127.0.0.1 --connect-port 20001 --update-rekey-messages 10 --session-rekey-messages 3
+./SAv6_proxy --mode outstation --listen-host 127.0.0.1 --listen-port 20000 --connect-host 127.0.0.1 --connect-port 20001 --cert certs/outstation-cert.pem --key certs/outstation-key.pem --ca certs/ca-cert.pem --update-rekey-messages 10 --session-rekey-messages 3
 ```
 
 Start the master-side proxy:
 
 ```sh
-./SAv6_proxy --mode master --listen-host 127.0.0.1 --listen-port 19999 --connect-host 127.0.0.1 --connect-port 20000 --update-rekey-messages 10 --session-rekey-messages 3
+./SAv6_proxy --mode master --listen-host 127.0.0.1 --listen-port 19999 --connect-host 127.0.0.1 --connect-port 20000 --cert certs/master-cert.pem --key certs/master-key.pem --ca certs/ca-cert.pem --update-rekey-messages 10 --session-rekey-messages 3
 ```
 
 Start the dummy master:
@@ -392,8 +441,8 @@ On Windows, add `.exe` to the program names:
 
 ```powershell
 .\dummy_station.exe --role outstation --listen-host 127.0.0.1 --listen-port 20001
-.\SAv6_proxy.exe --mode outstation --listen-host 127.0.0.1 --listen-port 20000 --connect-host 127.0.0.1 --connect-port 20001 --update-rekey-messages 10 --session-rekey-messages 3
-.\SAv6_proxy.exe --mode master --listen-host 127.0.0.1 --listen-port 19999 --connect-host 127.0.0.1 --connect-port 20000 --update-rekey-messages 10 --session-rekey-messages 3
+.\SAv6_proxy.exe --mode outstation --listen-host 127.0.0.1 --listen-port 20000 --connect-host 127.0.0.1 --connect-port 20001 --cert certs\outstation-cert.pem --key certs\outstation-key.pem --ca certs\ca-cert.pem --update-rekey-messages 10 --session-rekey-messages 3
+.\SAv6_proxy.exe --mode master --listen-host 127.0.0.1 --listen-port 19999 --connect-host 127.0.0.1 --connect-port 20000 --cert certs\master-cert.pem --key certs\master-key.pem --ca certs\ca-cert.pem --update-rekey-messages 10 --session-rekey-messages 3
 .\dummy_station.exe --role master --connect-host 127.0.0.1 --connect-port 19999 --count 5
 ```
 

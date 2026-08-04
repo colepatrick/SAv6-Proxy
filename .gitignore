@@ -7,3 +7,5 @@ __pycache__
 CLAUDE.md
 LAB_NOTES.md
 launch_ui_logs
+certs/*
+.agents
